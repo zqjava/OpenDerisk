@@ -9,7 +9,7 @@ use derisk;
 -- MySQL DDL Script for Derisk
 -- Version: 0.3.0
 -- Generated from SQLAlchemy ORM Models
--- Generated: 2026-03-12 14:20:36
+-- Generated: 2026-03-30 22:06:22
 -- ============================================================
 
 SET NAMES utf8mb4;
@@ -35,6 +35,27 @@ CREATE TABLE IF NOT EXISTS `derisk_cluster_registry_instance` (
   `gmt_modify` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_model_instance` (`model_name`, `host`, `port`, `sys_code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Table: streaming_tool_config
+-- Source Model: StreamingToolConfig
+CREATE TABLE IF NOT EXISTS `streaming_tool_config` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `app_code` VARCHAR(128) NOT NULL COMMENT '应用代码',
+  `tool_name` VARCHAR(128) NOT NULL COMMENT '工具名称',
+  `tool_display_name` VARCHAR(256) NULL COMMENT '工具显示名称',
+  `tool_description` TEXT NULL COMMENT '工具描述',
+  `param_configs` JSON NOT NULL COMMENT '参数配置',
+  `global_threshold` INT NULL DEFAULT 256 COMMENT '全局阈值',
+  `global_strategy` VARCHAR(32) NULL COMMENT '全局策略',
+  `global_renderer` VARCHAR(32) NULL COMMENT '全局渲染器',
+  `enabled` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用流式',
+  `priority` INT NOT NULL DEFAULT 0 COMMENT '优先级',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间',
+  `created_by` VARCHAR(128) NULL COMMENT '创建人',
+  `updated_by` VARCHAR(128) NULL COMMENT '更新人',
+  PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Table: chat_history
@@ -91,6 +112,30 @@ CREATE TABLE IF NOT EXISTS `user` (
 CREATE TABLE IF NOT EXISTS `recommend_question` (
   `gmt_create` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `gmt_modify` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Table: agent_input_queue
+-- Source Model: AgentInputQueueEntity
+CREATE TABLE IF NOT EXISTS `agent_input_queue` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `conv_id` VARCHAR(255) NOT NULL COMMENT '对话ID (agent_conv_id)',
+  `conv_session_id` VARCHAR(255) NOT NULL COMMENT '会话ID',
+  `message_id` VARCHAR(64) NOT NULL COMMENT '消息唯一ID',
+  `message_content` TEXT NOT NULL COMMENT '消息内容 (JSON)',
+  `sender_name` VARCHAR(128) NULL COMMENT '发送者名称',
+  `sender_type` VARCHAR(32) NULL COMMENT '发送者类型 (user/system)',
+  `status` VARCHAR(20) NOT NULL COMMENT 'pending/processing/consumed',
+  `consumed_at` DATETIME NULL COMMENT '消费时间',
+  `consumed_by` VARCHAR(64) NULL COMMENT '消费的服务器实例ID',
+  `priority` INT NULL DEFAULT 0 COMMENT '优先级 (数字越大越优先)',
+  `extra` TEXT NULL COMMENT '扩展信息 (JSON)',
+  `gmt_create` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `gmt_modified` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT '更新时间',
+  `gmt_modify` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_input_conv_session_status` (`conv_session_id`, `status`),
+  KEY `idx_input_conv_id_status` (`conv_id`, `status`),
+  KEY `idx_input_gmt_create` (`gmt_create`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Table: authorization_audit_log
@@ -263,24 +308,25 @@ CREATE TABLE IF NOT EXISTS `gpts_messages` (
   `is_success` TINYINT(1) NULL DEFAULT 1 COMMENT 'is success',
   `app_code` VARCHAR(255) NOT NULL COMMENT 'The message in which app',
   `app_name` VARCHAR(255) NOT NULL COMMENT 'The message in which app name',
-  `thinking` TEXT NULL COMMENT 'Thinking of the speech',
-  `content` TEXT NULL COMMENT 'Content of the speech',
+  `thinking` LONGTEXT NULL COMMENT 'Thinking of the speech',
+  `content` LONGTEXT NULL COMMENT 'Content of the speech',
   `content_types` VARCHAR(1000) NULL COMMENT 'Content types of the speech',
   `message_type` VARCHAR(255) NULL COMMENT 'type of the message',
-  `system_prompt` TEXT NULL COMMENT 'this message system prompt',
-  `user_prompt` TEXT NULL COMMENT 'this message system prompt',
+  `system_prompt` LONGTEXT NULL COMMENT 'this message system prompt',
+  `user_prompt` LONGTEXT NULL COMMENT 'this message system prompt',
   `show_message` TINYINT(1) NULL COMMENT 'Whether the current message needs to be displayed to the user',
   `goal_id` VARCHAR(255) NULL COMMENT 'The target id to the current message',
   `current_goal` TEXT NULL COMMENT 'The target corresponding to the current message',
   `context` TEXT NULL COMMENT 'Current conversation context',
   `review_info` TEXT NULL COMMENT 'Current conversation review info',
-  `action_report` TEXT NULL COMMENT 'Current conversation action report',
+  `action_report` LONGTEXT NULL COMMENT 'Current conversation action report',
   `resource_info` TEXT NULL COMMENT 'Current conversation resource info',
   `role` VARCHAR(255) NULL COMMENT 'The role of the current message content',
   `avatar` VARCHAR(255) NULL COMMENT 'The avatar of the agent who send current message content',
   `metrics` VARCHAR(1000) NULL COMMENT 'The performance metrics of agent messages',
-  `tool_calls` TEXT NULL COMMENT 'The tool_calls of agent messages',
-  `observation` TEXT NULL COMMENT 'The  message observation',
+  `tool_calls` LONGTEXT NULL COMMENT 'The tool_calls of agent messages',
+  `input_tools` LONGTEXT NULL COMMENT 'The input tools passed to LLM',
+  `observation` LONGTEXT NULL COMMENT 'The  message observation',
   `gmt_create` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'create time',
   `gmt_modified` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'last update time',
   `gmt_modify` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
@@ -457,7 +503,7 @@ CREATE TABLE IF NOT EXISTS `gpts_app_config` (
   `system_prompt_template` TEXT NULL COMMENT '当前版本配置的system prompt模版',
   `user_prompt_template` TEXT NULL COMMENT '当前版本配置的user prompt模版',
   `layout` VARCHAR(255) NULL COMMENT '当前版本配置的布局配置',
-  `custom_variables` VARCHAR(2000) NULL COMMENT '当前版本配置自定义参数配置',
+  `custom_variables` TEXT NULL COMMENT '当前版本配置自定义参数配置',
   `llm_config` TEXT NULL COMMENT '当前版本配置的模型配置',
   `resource_knowledge` TEXT NULL COMMENT '当前版本配置的知识配置',
   `resource_tool` TEXT NULL COMMENT '当前版本配置的工具配置',

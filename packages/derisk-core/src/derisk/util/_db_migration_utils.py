@@ -79,23 +79,22 @@ def create_migration_script(
         current_rev = context.get_current_revision()
         head_rev = script_dir.get_current_head()
 
-    logger.info(
-        f"alembic migration current revision: {current_rev}, latest revision: "
-        f"{head_rev}"
-    )
-    should_create_revision = (
-        (current_rev is None and head_rev is None)
-        or current_rev != head_rev
-        or create_new_revision_if_noting_to_update
-    )
-    if should_create_revision:
-        with engine.connect() as connection:
+        logger.info(
+            f"alembic migration current revision: {current_rev}, latest revision: "
+            f"{head_rev}"
+        )
+        should_create_revision = (
+            (current_rev is None and head_rev is None)
+            or current_rev != head_rev
+            or create_new_revision_if_noting_to_update
+        )
+        if should_create_revision:
             alembic_cfg.attributes["connection"] = connection
             revision = command.revision(alembic_cfg, message=message, autogenerate=True)
             # Return the path of the generated migration script
             return revision.path
-    elif current_rev == head_rev:
-        logger.info("No migration script to generate, database is up-to-date")
+        elif current_rev == head_rev:
+            logger.info("No migration script to generate, database is up-to-date")
     # If no new revision is created, return None or an appropriate message
     return None
 
@@ -111,10 +110,10 @@ def upgrade_database(
         target_version: target version, default is head(latest version)
     """
     # 开启 SQL 输出 - 添加这行代码
-    alembic_cfg.set_main_option('show_sql', 'true')
+    alembic_cfg.set_main_option("show_sql", "true")
 
     # 提高日志级别（可选）
-    alembic_cfg.set_main_option('log_level', 'INFO')
+    alembic_cfg.set_main_option("log_level", "INFO")
 
     with engine.connect() as connection:
         alembic_cfg.attributes["connection"] = connection
@@ -192,6 +191,11 @@ def clean_alembic_migration(alembic_cfg: AlembicConfig, engine: Engine) -> None:
                 os.remove(filepath)
             else:
                 shutil.rmtree(filepath, ignore_errors=True)
+
+    # Recreate versions directory for future migrations
+    versions_dir = os.path.join(script_location, "versions")
+    os.makedirs(versions_dir, exist_ok=True)
+    print(f"Recreated versions directory: {versions_dir}")
 
     # Delete Alembic version table if exists
     version_table = alembic_cfg.get_main_option("version_table") or "alembic_version"
@@ -284,6 +288,20 @@ def _check_database_migration_status(alembic_cfg: AlembicConfig, engine: Engine)
 
     logger.info(script_info_msg)
 
+    # Auto-fix: if database has revision but no migration scripts exist
+    if head_rev is None and current_rev is not None:
+        logger.warning(
+            f"Database has revision '{current_rev}', but no migration scripts found. "
+            "This usually happens when migration scripts were deleted manually. "
+            "Auto-cleaning migration history to allow re-initialization..."
+        )
+        clean_alembic_migration(alembic_cfg, engine)
+        logger.info(
+            "Migration history cleaned successfully. The system will re-initialize "
+            "database metadata on next startup."
+        )
+        return
+
     if current_rev != head_rev:
         logger.error(
             "Database is not at the latest revision. "
@@ -364,46 +382,47 @@ def _ddl_init_and_upgrade(
         logger.warning(warn_msg)
     from derisk.storage.metadata.db_manager import db
 
-    alembic_cfg = create_alembic_config(
-        default_meta_data_path,
-        db.engine,
-        db.Model,
-        db.session(),
-        alembic_ini_path,
-        script_location,
-    )
-    try:
-        _check_database_migration_status(alembic_cfg, db.engine)
-    except Exception as e:
-        logger.error(f"Failed to check database migration status: {e}")
-        raise
-    latest_revision_before = "__latest_revision_before__"
-    new_script_path = None
-    try:
-        latest_revision_before = _get_latest_revision(alembic_cfg, db.engine)
-        # create_new_revision_if_noting_to_update=False avoid creating a lot of empty
-        # migration scripts
-        # TODO Set create_new_revision_if_noting_to_update=False, not working now.
-        new_script_path = create_migration_script(
-            alembic_cfg, db.engine, create_new_revision_if_noting_to_update=True
+    with db.session(commit=False) as session:
+        alembic_cfg = create_alembic_config(
+            default_meta_data_path,
+            db.engine,
+            db.Model,
+            session,
+            alembic_ini_path,
+            script_location,
         )
-        upgrade_database(alembic_cfg, db.engine)
-    except CommandError as e:
-        if "Target database is not up to date" in str(e):
-            logger.error(
-                f"Initialize and upgrade database metadata with alembic failed, error "
-                f"detail: {str(e)} "
-                f"you can try the following solutions:\n{_MIGRATION_SOLUTION}\n"
+        try:
+            _check_database_migration_status(alembic_cfg, db.engine)
+        except Exception as e:
+            logger.error(f"Failed to check database migration status: {e}")
+            raise
+        latest_revision_before = "__latest_revision_before__"
+        new_script_path = None
+        try:
+            latest_revision_before = _get_latest_revision(alembic_cfg, db.engine)
+            # create_new_revision_if_noting_to_update=False avoid creating a lot of empty
+            # migration scripts
+            # TODO Set create_new_revision_if_noting_to_update=False, not working now.
+            new_script_path = create_migration_script(
+                alembic_cfg, db.engine, create_new_revision_if_noting_to_update=True
             )
-            raise Exception(
-                "Initialize and upgrade database metadata with alembic failed, "
-                "you can see the error and solutions above"
-            ) from e
-        else:
-            latest_revision_after = _get_latest_revision(alembic_cfg, db.engine)
-            if latest_revision_before != latest_revision_after:
+            upgrade_database(alembic_cfg, db.engine)
+        except CommandError as e:
+            if "Target database is not up to date" in str(e):
                 logger.error(
-                    f"Upgrade database failed. Please review the migration script "
-                    f"manually. Failed script path: {new_script_path}\nError: {e}"
+                    f"Initialize and upgrade database metadata with alembic failed, error "
+                    f"detail: {str(e)} "
+                    f"you can try the following solutions:\n{_MIGRATION_SOLUTION}\n"
                 )
-            raise e
+                raise Exception(
+                    "Initialize and upgrade database metadata with alembic failed, "
+                    "you can see the error and solutions above"
+                ) from e
+            else:
+                latest_revision_after = _get_latest_revision(alembic_cfg, db.engine)
+                if latest_revision_before != latest_revision_after:
+                    logger.error(
+                        f"Upgrade database failed. Please review the migration script "
+                        f"manually. Failed script path: {new_script_path}\nError: {e}"
+                    )
+                raise e

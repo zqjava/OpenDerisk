@@ -69,8 +69,13 @@ Digital Employees (Agents) in OpenDeRisk
 curl -fsSL https://raw.githubusercontent.com/derisk-ai/OpenDerisk/main/install.sh | bash
 ```
 #### Configuration File
-After installation, you need to configure the system. Create a configuration file:
-Edit `~/.openderisk/derisk-proxy-aliyun.toml` and set your API keys.
+After installation, the default configuration file is automatically initialized at:
+`~/.openderisk/configs/derisk-proxy-aliyun.toml`
+
+Edit this file and set your API keys:
+```shell
+vi ~/.openderisk/configs/derisk-proxy-aliyun.toml
+```
 
 #### Start 
 ```
@@ -107,10 +112,34 @@ uv sync --all-packages --frozen \
     --extra "derisks" \
     --extra "storage_oss2" \
     --extra "client" \
-    --extra "ext_base"
+    --extra "ext_base" \
+    --extra "channel_dingtalk"
 ```
 
+> Note: `channel_dingtalk` is optional. Skip it if you don't need DingTalk channel support.
+
 #### Start Server
+
+**🚀 Quick Start (Zero Configuration, Recommended)**
+
+Start without any configuration file:
+
+```bash
+# Method 1: Use quickstart command
+uv run derisk quickstart
+
+# Method 2: Use startup script
+./start.sh
+
+# Method 3: Specify port
+uv run derisk quickstart -p 8888
+```
+
+After starting, visit http://localhost:7777 and configure models and settings through the web UI.
+
+For detailed instructions, see: [Quick Start Guide](QUICKSTART.md)
+
+**📝 Start with Configuration File**
 
 Configure the API_KEY in `derisk-proxy-aliyun.toml`, then run:
 
@@ -121,6 +150,10 @@ After downloading, move datasets to `pilot/datasets/`
 
 Run the startup command:
 ```bash
+# Start with configuration file
+uv run derisk quickstart -c configs/derisk-proxy-aliyun.toml
+
+# Or use traditional method
 uv run python packages/derisk-app/src/derisk_app/derisk_server.py --config configs/derisk-proxy-aliyun.toml
 ```
 

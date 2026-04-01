@@ -56,23 +56,89 @@ logger = logging.getLogger(__name__)
 # 消息通道迭代器
 # --------------------------
 class QueueIterator:
-    def __init__(self, queue: asyncio.Queue):
+    """异步队列迭代器，支持超时机制防止无限等待。
+
+    当队列长时间没有新消息时，会定期检查是否有错误发生，
+    避免因后台任务卡死或异常导致的无限等待。
+    """
+
+    DEFAULT_TIMEOUT = 30.0
+    MAX_TIMEOUT_COUNT = 3  # 最大连续超时次数，超过后抛出异常
+
+    def __init__(self, queue: asyncio.Queue, timeout: Optional[float] = None):
         self.queue = queue
+        self.timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT
+        self._error: Optional[Exception] = None
+        self._stopped = False
+        self._timeout_count = 0  # 连续超时计数器
+
+    def set_error(self, error: Exception):
+        """设置错误状态，将在下次迭代时抛出。"""
+        self._error = error
+        try:
+            self.queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    def stop(self):
+        """停止迭代器。"""
+        self._stopped = True
+        try:
+            self.queue.put_nowait("[DONE]")
+        except asyncio.QueueFull:
+            pass
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
         start = time.perf_counter()
-        item = await self.queue.get()
-        if item == "[DONE]":
-            self.queue.task_done()
-            raise StopAsyncIteration
-        logger.debug(f"Queue wait: {(time.perf_counter() - start) * 1000:.2f}ms")
-        try:
-            return item
-        finally:
-            self.queue.task_done()
+
+        while True:
+            if self._error:
+                raise self._error
+
+            if self._stopped:
+                raise StopAsyncIteration
+
+            try:
+                item = await asyncio.wait_for(self.queue.get(), timeout=self.timeout)
+                self._timeout_count = 0  # 成功获取消息，重置超时计数
+            except asyncio.TimeoutError:
+                self._timeout_count += 1
+                wait_time = time.perf_counter() - start
+
+                if self._timeout_count >= self.MAX_TIMEOUT_COUNT:
+                    logger.error(
+                        f"Queue timeout exceeded max retries ({self.MAX_TIMEOUT_COUNT}), "
+                        f"total wait: {wait_time:.2f}s. Terminating to prevent infinite wait."
+                    )
+                    raise TimeoutError(
+                        f"对话响应超时，已等待 {wait_time:.1f} 秒。"
+                        f"请检查后端服务状态或稍后重试。"
+                    )
+
+                logger.warning(
+                    f"Queue wait timeout ({self._timeout_count}/{self.MAX_TIMEOUT_COUNT}) "
+                    f"after {wait_time:.2f}s, continuing to wait... (queue size: {self.queue.qsize()})"
+                )
+                continue
+
+            if item == "[DONE]":
+                self.queue.task_done()
+                raise StopAsyncIteration
+
+            if item is None:
+                if self._error:
+                    raise self._error
+                self.queue.task_done()
+                continue
+
+            logger.debug(f"Queue wait: {(time.perf_counter() - start) * 1000:.2f}ms")
+            try:
+                return item
+            finally:
+                self.queue.task_done()
 
 
 class AgentTaskType(Enum):
@@ -227,6 +293,12 @@ class ConversationCache:
         ## Todo 缓存
         self.todos: List[TodoItem] = []  # 任务列表
 
+        ## 文件系统渲染追踪 (用于增量更新前端文件列表)
+        self.rendered_file_ids: set = set()  # 已渲染到前端的 file_id 集合
+
+        ## SystemEventManager 用于记录系统事件
+        self.event_manager: Optional[Any] = None
+
         self.last_access = time.time()
         self.lock = asyncio.Lock()  # 会话级锁
 
@@ -262,6 +334,9 @@ class ConversationCache:
 
         # 清理 Todo
         self.todos.clear()
+
+        # 清理文件系统渲染追踪
+        self.rendered_file_ids.clear()
 
         # 通知队列消费者退出
         try:
@@ -354,6 +429,8 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
     可作为 AgentFileSystem、WorkLogManager、KanbanManager 和 Todo 工具的统一存储后端。
     """
 
+    name = "derisk_gpts_memory"  # Component name for registration
+
     def __init__(
         self,
         plans_memory: GptsPlansMemory = DefaultGptsPlansMemory(),
@@ -367,8 +444,8 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         file_memory: AgentFileMemory = None,
         file_metadata_db_storage: Optional[Any] = None,  # 数据库文件元数据存储后端
         work_log_db_storage: Optional[Any] = None,  # 数据库 WorkLog 存储后端
-        kanban_db_storage: Optional[Any] = None,   # 数据库 Kanban 存储后端
-        todo_db_storage: Optional[Any] = None,     # 数据库 Todo 存储后端
+        kanban_db_storage: Optional[Any] = None,  # 数据库 Kanban 存储后端
+        todo_db_storage: Optional[Any] = None,  # 数据库 Todo 存储后端
     ):
         if hasattr(self, "_initialized"):
             return
@@ -393,6 +470,10 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         self._work_log_db_storage = work_log_db_storage
         self._kanban_db_storage = kanban_db_storage
         self._todo_db_storage = todo_db_storage
+
+    def init_app(self, system_app):
+        """Initialize with system app (required for component registration)."""
+        pass
 
     @property
     def file_memory(self) -> AgentFileMemory:
@@ -616,9 +697,11 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
     # --------------------------
     # 外部核心方法区
     # --------------------------
-    async def queue_iterator(self, conv_id: str) -> Optional[QueueIterator]:
+    async def queue_iterator(
+        self, conv_id: str, timeout: Optional[float] = None
+    ) -> Optional[QueueIterator]:
         cache = await self._get_cache(conv_id)
-        return QueueIterator(cache.channel) if cache else None
+        return QueueIterator(cache.channel, timeout=timeout) if cache else None
 
     async def init(
         self,
@@ -627,8 +710,12 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         vis_converter: VisProtocolConverter = None,
         start_round: int = 0,
         app_code=None,
+        event_manager: Optional[Any] = None,
     ):
         cache = await self._get_or_create_cache(conv_id, start_round, vis_converter)
+        if event_manager:
+            cache.event_manager = event_manager
+            logger.info(f"[GptsMemory] 设置 SystemEventManager: conv_id={conv_id[:8]}")
         if history_messages:
             await self._cache_messages(conv_id, history_messages)
 
@@ -654,6 +741,15 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
 
     async def async_vis_converter(self, conv_id: str) -> Optional[VisProtocolConverter]:
         cache = await self._get_cache(conv_id)
+        if cache:
+            converter_type = type(cache.vis_converter).__name__
+            render_name = getattr(cache.vis_converter, "render_name", "unknown")
+            logger.info(
+                f"[async_vis_converter] conv_id={conv_id}, "
+                f"converter_type={converter_type}, render_name={render_name}"
+            )
+        else:
+            logger.warning(f"[async_vis_converter] conv_id={conv_id}, cache NOT FOUND!")
         return cache.vis_converter if cache else None
 
     # 保留同步版，但加注释
@@ -743,6 +839,10 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         messages = messages[cache.start_round :]
         messages = await self._merge_messages_async(messages)
         all_plans = cache.plans
+
+        # 从 cache 获取 event_manager，如果没有从 kwargs 获取
+        event_manager = kwargs.pop("event_manager", None) or cache.event_manager
+
         return await cache.vis_converter.visualization(
             messages=messages,
             plans_map=all_plans,
@@ -759,6 +859,7 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
             task_manager=cache.task_manager,
             conv_id=conv_id,
             cache=cache,
+            event_manager=event_manager,
             **kwargs,
         )
 
@@ -1031,6 +1132,26 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
             self._executor, self.message_memory.get_by_session_id, conv_session_id
         )
 
+    async def stop(self, conv_id: str):
+        """停止会话的消息推送和消费者.
+
+        设置停止标志并通知队列消费者退出，但不清理会话数据。
+
+        Args:
+            conv_id: 会话ID
+        """
+        logger.info(f"Stopping memory for {conv_id}")
+        cache = await self._get_cache(conv_id)
+        if cache:
+            # 设置停止标志，阻止新的消息推送
+            cache.stop_flag = True
+            # 通知队列消费者退出
+            try:
+                cache.channel.put_nowait("[DONE]")
+            except asyncio.QueueFull:
+                pass  # 队列满，忽略
+            logger.info(f"Stopped conversation: {conv_id}")
+
     async def clear(self, conv_id: str):
         """主动清理会话资源"""
         logger.info(f"Clearing memory for {conv_id}")
@@ -1068,8 +1189,12 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         if save_db:
             if self._file_metadata_db_storage:
                 try:
-                    await self._file_metadata_db_storage.save_file_metadata(file_metadata)
-                    logger.debug(f"Saved file metadata to DB storage: {file_metadata.file_id}")
+                    await self._file_metadata_db_storage.save_file_metadata(
+                        file_metadata
+                    )
+                    logger.debug(
+                        f"Saved file metadata to DB storage: {file_metadata.file_id}"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to save file metadata to DB storage: {e}")
             else:
@@ -1077,7 +1202,9 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
                     await blocking_func_to_async(
                         self._executor, self._file_memory.append, file_metadata
                     )
-                    logger.debug(f"Saved file metadata to file memory: {file_metadata.file_id}")
+                    logger.debug(
+                        f"Saved file metadata to file memory: {file_metadata.file_id}"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to save file metadata to file memory: {e}")
 
@@ -1098,7 +1225,9 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         if self._file_metadata_db_storage:
             try:
                 await self._file_metadata_db_storage.update_file_metadata(file_metadata)
-                logger.debug(f"Updated file metadata in DB storage: {file_metadata.file_id}")
+                logger.debug(
+                    f"Updated file metadata in DB storage: {file_metadata.file_id}"
+                )
             except Exception as e:
                 logger.error(f"Failed to update file metadata in DB storage: {e}")
         else:
@@ -1176,11 +1305,15 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
             return cache.files.get(file_id)
         if self._file_metadata_db_storage:
             try:
-                file_metadata = await self._file_metadata_db_storage.get_file_by_key(conv_id, file_key)
+                file_metadata = await self._file_metadata_db_storage.get_file_by_key(
+                    conv_id, file_key
+                )
                 if file_metadata and cache:
                     async with await self._get_conv_lock(conv_id):
                         cache.files[file_metadata.file_id] = file_metadata
-                        cache.file_key_index[file_metadata.file_key] = file_metadata.file_id
+                        cache.file_key_index[file_metadata.file_key] = (
+                            file_metadata.file_id
+                        )
                 return file_metadata
             except Exception as e:
                 logger.error(f"Failed to get file by key from DB storage: {e}")
@@ -1228,7 +1361,9 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         if self._file_metadata_db_storage:
             try:
                 for file_key, file_id in cache.file_key_index.items():
-                    await self._file_metadata_db_storage.save_catalog(conv_id, file_key, file_id)
+                    await self._file_metadata_db_storage.save_catalog(
+                        conv_id, file_key, file_id
+                    )
                 logger.debug(f"Saved file catalog to DB storage for {conv_id}")
             except Exception as e:
                 logger.error(f"Failed to save file catalog to DB storage: {e}")
@@ -1320,7 +1455,10 @@ class GptsMemory(FileMetadataStorage, WorkLogStorage, KanbanStorage, TodoStorage
         else:
             try:
                 await blocking_func_to_async(
-                    self._executor, self._file_memory.delete_by_file_key, conv_id, file_key
+                    self._executor,
+                    self._file_memory.delete_by_file_key,
+                    conv_id,
+                    file_key,
                 )
                 return True
             except Exception as e:

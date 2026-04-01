@@ -66,6 +66,8 @@ class CoreV2Component(BaseComponent):
         self._dynamic_agent_factory = None
         # 沙箱管理器缓存，同一会话内共享
         self._sandbox_managers: Dict[str, Any] = {}
+        # app_code → app_name 显示名称缓存
+        self._app_name_cache: Dict[str, str] = {}
 
     async def async_after_start(self):
         """组件启动后自动启动 Core_v2"""
@@ -124,15 +126,42 @@ class CoreV2Component(BaseComponent):
         if self._started:
             return
 
+        # Initialize GptsMemory with database persistence (MetaDerisksMessageMemory)
+        # This ensures Core V2 messages are saved to gpts_messages table
         gpts_memory = None
         try:
             from derisk.agent.core.memory.gpts.gpts_memory import GptsMemory
+            from derisk_serve.agent.agents.derisks_memory import (
+                MetaDerisksPlansMemory,
+                MetaDerisksMessageMemory,
+                MetaDerisksWorkLogStorage,
+                MetaDerisksKanbanStorage,
+                MetaDerisksTodoStorage,
+                MetaDerisksFileMetadataStorage,
+            )
 
+            # Try to get from system components first
             gpts_memory = self.system_app.get_component(
                 ComponentType.GPTS_MEMORY, GptsMemory
             )
-        except Exception:
-            logger.warning("GptsMemory not found")
+
+            # If not registered, create a new instance with database persistence
+            if gpts_memory is None:
+                gpts_memory = GptsMemory(
+                    plans_memory=MetaDerisksPlansMemory(),
+                    message_memory=MetaDerisksMessageMemory(),
+                    file_metadata_db_storage=MetaDerisksFileMetadataStorage(),
+                    work_log_db_storage=MetaDerisksWorkLogStorage(),
+                    kanban_db_storage=MetaDerisksKanbanStorage(),
+                    todo_db_storage=MetaDerisksTodoStorage(),
+                )
+                # Register to system_app so it can be accessed via get_component
+                self.system_app.register_instance(gpts_memory)
+                logger.info(
+                    "[CoreV2Component] Created and registered GptsMemory with database persistence (MetaDerisksMessageMemory)"
+                )
+        except Exception as e:
+            logger.warning(f"GptsMemory initialization failed: {e}")
 
         # 获取 LLM 客户端用于分层上下文管理
         llm_client = None
@@ -207,7 +236,7 @@ class CoreV2Component(BaseComponent):
         2. 动态加载 (根据 app_code 从数据库加载配置)
         """
 
-        def create_from_template(agent_name: str, context, **kwargs):
+        async def create_from_template(agent_name: str, context, **kwargs):
             """根据模板名称创建 Agent（简化版：仅支持核心3个）"""
             from derisk.agent.core.plan.unified_context import (
                 V2_AGENT_TEMPLATES,
@@ -217,6 +246,18 @@ class CoreV2Component(BaseComponent):
             template = V2_AGENT_TEMPLATES.get(V2AgentTemplate(agent_name))
             if template:
                 logger.info(f"[CoreV2Component] 使用模板创建 Agent: {agent_name}")
+
+                # 获取或创建 sandbox_manager
+                sandbox_manager = (
+                    await self._get_or_create_sandbox_manager_for_template(
+                        context, agent_name
+                    )
+                )
+                if sandbox_manager:
+                    kwargs["sandbox_manager"] = sandbox_manager
+                    logger.info(
+                        f"[CoreV2Component] 注入 sandbox_manager 到 Agent: {agent_name}"
+                    )
 
                 # 内置Agent：react_reasoning 和 coding 有独立实现
                 if agent_name == "react_reasoning":
@@ -252,7 +293,7 @@ class CoreV2Component(BaseComponent):
 
             try:
                 if agent_name in [t.value for t in V2AgentTemplate]:
-                    return create_from_template(agent_name, context, **kwargs)
+                    return await create_from_template(agent_name, context, **kwargs)
 
                 from derisk_serve.building.app.config import (
                     SERVE_SERVICE_COMPONENT_NAME,
@@ -267,6 +308,9 @@ class CoreV2Component(BaseComponent):
                 )
 
                 if gpt_app:
+                    # 缓存 app_code → app_name 映射
+                    if gpt_app.app_name:
+                        self._app_name_cache[agent_name] = gpt_app.app_name
                     return await self._build_v2_agent_from_gpts_app(
                         gpt_app, context, **kwargs
                     )
@@ -284,7 +328,7 @@ class CoreV2Component(BaseComponent):
             from derisk.agent.core.plan.unified_context import V2AgentTemplate
 
             if app_code in [t.value for t in V2AgentTemplate]:
-                return create_from_template(app_code, context, **kwargs)
+                return await create_from_template(app_code, context, **kwargs)
 
             try:
                 from derisk_serve.building.app.config import (
@@ -300,6 +344,9 @@ class CoreV2Component(BaseComponent):
                 )
 
                 if gpt_app:
+                    # 缓存 app_code → app_name 映射
+                    if gpt_app.app_name:
+                        self._app_name_cache[app_code] = gpt_app.app_name
                     return await self._build_v2_agent_from_gpts_app(
                         gpt_app, context, **kwargs
                     )
@@ -312,17 +359,24 @@ class CoreV2Component(BaseComponent):
         self._dynamic_agent_factory = dynamic_agent_factory
 
         # 注册所有Agent模板工厂（简化版：核心3个Agent）
+        # 注意：create_from_template 是 async 函数，需要用 async 包装
         for template_name in [
             "react_reasoning",
             "coding",
             "simple_chat",
         ]:
-            self.runtime.register_agent_factory(
-                template_name,
-                lambda ctx, name=template_name, **kw: create_from_template(
-                    name, ctx, **kw
-                ),
-            )
+
+            async def make_template_factory(name):
+                async def factory(ctx, **kw):
+                    return await create_from_template(name, ctx, **kw)
+
+                return factory
+
+            # 直接注册 create_from_template 的包装
+            async def template_factory(ctx, name=template_name, **kw):
+                return await create_from_template(name, ctx, **kw)
+
+            self.runtime.register_agent_factory(template_name, template_factory)
 
         logger.info(
             "[CoreV2Component] Agent 工厂已注册（简化版：react_reasoning, coding, simple_chat）"
@@ -392,6 +446,20 @@ class CoreV2Component(BaseComponent):
                 f"user_id={sandbox_config.user_id}, template={sandbox_config.template_id}"
             )
 
+            file_storage_client = None
+            try:
+                from derisk.core.interface.file import FileStorageClient
+
+                file_storage_client = FileStorageClient.get_instance(self._system_app)
+                if file_storage_client:
+                    logger.info(
+                        f"[CoreV2Component] FileStorageClient retrieved for sandbox creation"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[CoreV2Component] Failed to get FileStorageClient: {e}"
+                )
+
             sandbox_client = await AutoSandbox.create(
                 user_id=staff_no or sandbox_config.user_id,
                 agent=sandbox_config.agent_name,
@@ -399,6 +467,7 @@ class CoreV2Component(BaseComponent):
                 template=sandbox_config.template_id,
                 work_dir=sandbox_config.work_dir,
                 skill_dir=sandbox_config.skill_dir,
+                file_storage_client=file_storage_client,
                 oss_ak=sandbox_config.oss_ak,
                 oss_sk=sandbox_config.oss_sk,
                 oss_endpoint=sandbox_config.oss_endpoint,
@@ -426,6 +495,88 @@ class CoreV2Component(BaseComponent):
         except Exception as e:
             logger.error(
                 f"[CoreV2Component] Failed to create sandbox manager: {e}",
+                exc_info=True,
+            )
+            return None
+
+    async def _get_or_create_sandbox_manager_for_template(
+        self, context, agent_name: str
+    ) -> Optional[Any]:
+        """
+        为模板 Agent 获取或创建 sandbox_manager
+
+        Args:
+            context: Agent 上下文
+            agent_name: Agent 名称
+
+        Returns:
+            SandboxManager 实例或 None
+        """
+        conv_id = getattr(context, "conv_id", None) or getattr(
+            context, "session_id", "default"
+        )
+        staff_no = getattr(context, "staff_no", None) or "default"
+        sandbox_key = f"{conv_id}_{staff_no}"
+
+        # 检查缓存
+        if sandbox_key in self._sandbox_managers:
+            logger.info(
+                f"[CoreV2Component] Using cached sandbox manager for template: {sandbox_key}"
+            )
+            return self._sandbox_managers[sandbox_key]
+
+        # 创建新的 sandbox_manager
+        try:
+            from derisk_app.config import SandboxConfigParameters
+            from derisk.agent.core.sandbox_manager import SandboxManager
+            from derisk.sandbox import AutoSandbox
+
+            app_config = self.system_app.config.configs.get("app_config")
+            sandbox_config: Optional[SandboxConfigParameters] = (
+                app_config.sandbox if app_config else None
+            )
+
+            if not sandbox_config:
+                logger.warning(
+                    "[CoreV2Component] Sandbox config not found for template agent"
+                )
+                return None
+
+            logger.info(
+                f"[CoreV2Component] Creating sandbox for template agent: {agent_name}, "
+                f"type={sandbox_config.type}"
+            )
+
+            sandbox_client = await AutoSandbox.create(
+                user_id=staff_no or sandbox_config.user_id,
+                agent=agent_name,
+                type=sandbox_config.type,
+                template=sandbox_config.template_id,
+                work_dir=sandbox_config.work_dir,
+                skill_dir=sandbox_config.skill_dir,
+            )
+
+            sandbox_manager = SandboxManager(sandbox_client=sandbox_client)
+
+            # 后台启动和初始化沙箱服务
+            import asyncio
+
+            sandbox_task = asyncio.create_task(sandbox_manager.acquire())
+            sandbox_manager.set_init_task(sandbox_task)
+
+            # 缓存沙箱管理器
+            self._sandbox_managers[sandbox_key] = sandbox_manager
+
+            logger.info(
+                f"[CoreV2Component] Sandbox manager created for template: {sandbox_key}, "
+                f"work_dir={sandbox_client.work_dir}"
+            )
+
+            return sandbox_manager
+
+        except Exception as e:
+            logger.error(
+                f"[CoreV2Component] Failed to create sandbox manager for template: {e}",
                 exc_info=True,
             )
             return None
@@ -517,8 +668,12 @@ class CoreV2Component(BaseComponent):
         logger.info(f"  - agent_name: {unified_ctx.agent_name}")
         logger.info(f"  - team_mode: {unified_ctx.team_mode}")
 
-        tools = await self._build_tools_from_resources(gpt_app.resources)
-        resources = await self._build_resources_dict(gpt_app.resources)
+        # 合并 resources 和 resource_tool，确保工具绑定数据被加载
+        all_resources = list(gpt_app.resources or [])
+        if getattr(gpt_app, "resource_tool", None):
+            all_resources.extend(gpt_app.resource_tool)
+        tools = await self._build_tools_from_resources(all_resources)
+        resources = await self._build_resources_dict(all_resources)
 
         # 获取 V2 Agent 模板配置
         from derisk.agent.core.plan.unified_context import (
@@ -744,6 +899,21 @@ class CoreV2Component(BaseComponent):
                 model_provider=model_provider,
             )
 
+        # 设置 Agent 的 app_id，确保 AgentRuntimeToolLoader 使用正确的应用代码
+        if agent and app_code:
+            if hasattr(agent, "_app_id"):
+                agent._app_id = app_code
+            if hasattr(agent, "_agent_name"):
+                agent._agent_name = agent_name or app_code
+            if hasattr(agent, "_tool_loader") and agent._tool_loader:
+                agent._tool_loader.app_id = app_code
+                agent._tool_loader.agent_name = agent_name or app_code
+                agent._tool_loader.invalidate_cache()
+                logger.info(
+                    f"[CoreV2Component] Updated agent tool loader: "
+                    f"app_id={app_code}, agent_name={agent_name}"
+                )
+
         # 如果应用有场景，读取场景内容并注入到Agent的System Prompt
         if agent and gpt_app.scenes and len(gpt_app.scenes) > 0 and sandbox_manager:
             try:
@@ -869,12 +1039,16 @@ class CoreV2Component(BaseComponent):
             raise
 
     async def _build_tools_from_resources(self, resources) -> Dict[str, Any]:
-        """从资源列表构建工具字典"""
+        """从资源列表构建工具字典
+
+        资源类型可能是 "tool" 或 "tool(source)" 格式（如 "tool(system)"、"tool(core)"）
+        """
         tools = {}
         if not resources:
             return tools
         for resource in resources:
-            if resource and getattr(resource, "type", None) == "tool":
+            res_type = getattr(resource, "type", None) or ""
+            if resource and (res_type == "tool" or res_type.startswith("tool(")):
                 tool_name = getattr(resource, "name", None)
                 if tool_name:
                     tools[tool_name] = resource
@@ -888,7 +1062,10 @@ class CoreV2Component(BaseComponent):
         for resource in resources:
             if not resource:
                 continue
-            res_type = getattr(resource, "type", None)
+            res_type = getattr(resource, "type", None) or ""
+            # 处理 "tool(source)" 格式的类型
+            if res_type.startswith("tool("):
+                res_type = "tools"
             if res_type in result:
                 result[res_type].append(resource)
         return result
@@ -950,6 +1127,35 @@ class CoreV2Component(BaseComponent):
             logger.exception(f"[CoreV2Component] 创建 LLM provider 失败: {e}")
             return None
 
+    def get_app_display_name(self, app_code: str) -> str:
+        """获取应用的显示名称（从缓存中查找，未命中则返回 app_code）"""
+        return self._app_name_cache.get(app_code, app_code)
+
+    async def resolve_app_display_name(self, app_code: str) -> str:
+        """解析应用的显示名称，未缓存时从数据库查询"""
+        if app_code in self._app_name_cache:
+            return self._app_name_cache[app_code]
+
+        try:
+            from derisk_serve.building.app.config import SERVE_SERVICE_COMPONENT_NAME
+            from derisk_serve.building.app.service.service import Service
+
+            app_service = self.system_app.get_component(
+                SERVE_SERVICE_COMPONENT_NAME, Service
+            )
+            gpt_app = await app_service.app_detail(
+                app_code, specify_config_code=None, building_mode=False
+            )
+            if gpt_app and gpt_app.app_name:
+                self._app_name_cache[app_code] = gpt_app.app_name
+                return gpt_app.app_name
+        except Exception as e:
+            logger.debug(
+                f"[CoreV2Component] Failed to resolve app name for {app_code}: {e}"
+            )
+
+        return app_code
+
     async def get_or_create_agent(self, app_code: str, context=None):
         """获取或创建 Agent 实例"""
         if app_code in self.runtime._agents:
@@ -976,21 +1182,6 @@ _core_v2: Optional[CoreV2Component] = None
 def get_core_v2() -> CoreV2Component:
     """获取 Core_v2 组件"""
     global _core_v2
-    import sys
-    import traceback
-
-    print(
-        f"[get_core_v2] called, _core_v2 is None: {_core_v2 is None}, id={id(_core_v2) if _core_v2 else 'N/A'}",
-        file=sys.stderr,
-        flush=True,
-    )
     if _core_v2 is None:
-        print("[get_core_v2] Stack trace:", file=sys.stderr, flush=True)
-        traceback.print_stack(file=sys.stderr)
         _core_v2 = CoreV2Component(CFG.SYSTEM_APP)
-        print(
-            f"[get_core_v2] created new instance, id={id(_core_v2)}",
-            file=sys.stderr,
-            flush=True,
-        )
     return _core_v2

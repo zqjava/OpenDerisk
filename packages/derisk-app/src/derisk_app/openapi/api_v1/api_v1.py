@@ -13,7 +13,7 @@ from fastapi import APIRouter, Body, Depends, File, Query, UploadFile, Backgroun
 from fastapi.responses import StreamingResponse
 
 from derisk._private.config import Config
-from derisk.component import ComponentType
+from derisk.component import ComponentType, SystemApp
 from derisk.configs import TAG_KEY_KNOWLEDGE_CHAT_DOMAIN_TYPE
 from derisk.core import ModelOutput, HumanMessage
 from derisk.core.awel import BaseOperator, CommonLLMHttpRequestBody
@@ -68,6 +68,50 @@ model_semaphore = None
 global_counter = 0
 
 user_recent_app_dao = UserRecentAppsDao()
+
+
+def _is_uuid_like(filename: str) -> bool:
+    """Check if filename looks like a UUID (file_id)."""
+    import re
+
+    name_without_ext = filename.rsplit(".", 1)[0]
+    uuid_pattern = re.compile(
+        r"^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$",
+        re.IGNORECASE,
+    )
+    return bool(uuid_pattern.match(name_without_ext))
+
+
+def _get_file_name_from_url_or_metadata(url_str: str, fs: FileStorageClient) -> str:
+    """Get original file name from URL or metadata storage.
+
+    When files are uploaded, they are stored with UUID as file_id, but original
+    filename is saved in metadata. This function retrieves the original filename.
+    """
+    from urllib.parse import urlparse, unquote
+
+    if url_str.startswith("derisk-fs://"):
+        try:
+            metadata = fs.storage_system.get_file_metadata_by_uri(url_str)
+            if metadata and metadata.file_name:
+                return metadata.file_name
+        except Exception:
+            pass
+
+    parsed = urlparse(url_str)
+    path_file_name = os.path.basename(unquote(parsed.path))
+
+    if path_file_name and not _is_uuid_like(path_file_name):
+        return path_file_name
+
+    try:
+        metadata = fs.storage_system.get_file_metadata_by_uri(url_str)
+        if metadata and metadata.file_name:
+            return metadata.file_name
+    except Exception:
+        pass
+
+    return None
 
 
 def __get_conv_user_message(conversations: dict):
@@ -214,6 +258,8 @@ async def file_upload(
     bucket = "derisk_app_file"
     file_params = []
 
+    import mimetypes
+
     for doc_file in doc_files:
         file_name = doc_file.filename
         custom_metadata = {
@@ -231,18 +277,31 @@ async def file_upload(
             custom_metadata=custom_metadata,
         )
 
+        doc_file.file.seek(0, 2)
+        file_size = doc_file.file.tell()
+        doc_file.file.seek(0)
+
         _, file_extension = os.path.splitext(file_name)
+        mime_type, _ = mimetypes.guess_type(file_name)
+        mime_type = mime_type or "application/octet-stream"
+
+        metadata = fs.storage_system.get_file_metadata_by_uri(file_uri)
+        file_id = metadata.file_id if metadata else ""
+
         file_param = {
             "is_oss": True,
             "file_path": file_uri,
             "file_name": file_name,
+            "file_size": file_size,
+            "file_extension": file_extension,
+            "mime_type": mime_type,
+            "file_id": file_id,
             "file_learning": False,
             "bucket": bucket,
+            "preview_url": fs.get_public_url(file_uri),
         }
         file_params.append(file_param)
 
-    # If only one file was uploaded, return the single file_param directly
-    # Otherwise return the array of file_params
     result = file_params[0] if len(file_params) == 1 else file_params
     return Result.succ(result)
 
@@ -352,7 +411,6 @@ async def chat_completions(
     # Adapt OpenAI messages format to user_input
     if not dialogue.user_input and dialogue.messages:
         try:
-            # Extract the last user message content
             last_message = next(
                 (
                     msg
@@ -394,6 +452,94 @@ async def chat_completions(
         in_message = HumanMessage.parse_chat_completion_message(
             dialogue.user_input, ignore_unknown_media=True
         )
+
+        # 处理文件输入：提取文件引用并增强消息
+        sandbox_file_refs = []
+        if in_message.has_media:
+            try:
+                from derisk_serve.agent.file_io import (
+                    process_chat_input_files,
+                    build_enhanced_query_with_files,
+                    SandboxFileRef,
+                )
+
+                user_inputs = []
+                if isinstance(in_message.content, list):
+                    for media in in_message.content:
+                        if hasattr(media, "type") and hasattr(media, "object"):
+                            if media.type == "image" and media.object.format.startswith(
+                                "url"
+                            ):
+                                url_str = str(media.object.data)
+                                file_name = _get_file_name_from_url_or_metadata(
+                                    url_str, fs
+                                )
+                                if not file_name:
+                                    file_name = f"image_{uuid.uuid4().hex[:8]}.jpg"
+
+                                user_inputs.append(
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": url_str,
+                                            "file_name": file_name,
+                                        },
+                                    }
+                                )
+                            elif (
+                                media.type == "file"
+                                and media.object.format.startswith("url")
+                            ):
+                                url_str = str(media.object.data)
+                                file_name = _get_file_name_from_url_or_metadata(
+                                    url_str, fs
+                                )
+                                if not file_name:
+                                    file_name = f"file_{uuid.uuid4().hex[:8]}"
+
+                                user_inputs.append(
+                                    {
+                                        "type": "file_url",
+                                        "file_url": {
+                                            "url": url_str,
+                                            "file_name": file_name,
+                                        },
+                                    }
+                                )
+
+                if user_inputs:
+                    result = await process_chat_input_files(
+                        user_inputs=user_inputs,
+                        sandbox=None,
+                        conv_id=dialogue.conv_uid,
+                    )
+                    sandbox_file_refs = result.sandbox_file_refs
+                    logger.info(
+                        f"[v1/chat] Processed {len(sandbox_file_refs)} files from user input"
+                    )
+                    # 打印 sandbox_file_refs 的详细信息
+                    for i, ref in enumerate(sandbox_file_refs):
+                        ref_dict = ref.to_dict() if hasattr(ref, "to_dict") else ref
+                        logger.info(
+                            f"[v1/chat] File {i}: file_name={ref_dict.get('file_name')}, "
+                            f"url={ref_dict.get('url', '')[:80] if ref_dict.get('url') else 'None'}..."
+                        )
+
+                    # 注意：不在 API 层构建带路径的消息
+                    # 文件路径将在 sandbox 创建后由 agent_chat.py 正确处理
+                    # 只传递 sandbox_file_refs 到 ext_info
+
+            except ImportError:
+                logger.warning("[v1/chat] file_io module not available")
+            except Exception as e:
+                logger.warning(f"[v1/chat] Failed to process files: {e}")
+
+        # 将 sandbox_file_refs 传递到 ext_info
+        if sandbox_file_refs:
+            dialogue.ext_info["sandbox_file_refs"] = [
+                ref.to_dict() if hasattr(ref, "to_dict") else ref
+                for ref in sandbox_file_refs
+            ]
 
         work_mode = dialogue.work_mode or WorkMode.ASYNC
 
@@ -449,7 +595,6 @@ async def chat_completions(
                 chat_in_params=dialogue.chat_in_params,
                 **dialogue.ext_info,
             )
-            # result 是 (None, agent_conv_id) 元组，提取会话ID
             agent_conv_id = result[1] if result else None
             return Result.succ(data={"conv_id": agent_conv_id})
         else:
@@ -477,15 +622,17 @@ async def chat_completions(
         logger.exception(f"Chat Exception!{dialogue}", e)
 
         async def error_text(err_msg):
-            yield f"data:{err_msg}\n\n"
+            error_content = json.dumps(
+                {"vis": f"[ERROR]{str(e)}[/ERROR]"}, ensure_ascii=False
+            )
+            yield f"data:{error_content}\n\n"
 
         return StreamingResponse(
             error_text(str(e)),
             headers=headers,
-            media_type="text/plain",
+            media_type="text/event-stream",
         )
     finally:
-        # write to recent usage app.
         if dialogue.user_name is not None and dialogue.app_code is not None:
             user_recent_app_dao.upsert(
                 user_code=dialogue.user_name,
@@ -515,14 +662,83 @@ async def model_types(controller: BaseModelController = Depends(get_model_contro
     logger.info("/controller/model/types")
     try:
         types = set()
-        models = await controller.get_all_instances(healthy_only=True)
-        for model in models:
-            worker_name, worker_type = model.model_name.split("@")
-            if worker_type == "llm" and worker_name not in [
-                "codegpt_proxyllm",
-                "text2sql_proxyllm",
-            ]:
-                types.add(worker_name)
+        config_models_found = False
+
+        # 1. Get models from system_app.config (JSON configuration) - PRIORITY
+        system_app = SystemApp.get_instance()
+        if system_app and system_app.config:
+            # PRIORITY 1: Try app_config from configs dict (JSON config source)
+            # This is the most reliable source as it's always updated via /api/v1/config/import
+            app_config = system_app.config.configs.get("app_config")
+            agent_llm_conf = None
+
+            if app_config:
+                agent_llm_attr = getattr(app_config, "agent_llm", None)
+                if agent_llm_attr:
+                    # Convert frontend format to backend format
+                    agent_llm_dict = (
+                        agent_llm_attr.model_dump(mode="json")
+                        if hasattr(agent_llm_attr, "model_dump")
+                        else dict(agent_llm_attr)
+                    )
+                    # Convert providers -> provider, models -> model
+                    if "providers" in agent_llm_dict:
+                        providers = agent_llm_dict.pop("providers")
+                        if isinstance(providers, list):
+                            converted = []
+                            for p in providers:
+                                if isinstance(p, dict):
+                                    cp = dict(p)
+                                    if "models" in cp:
+                                        cp["model"] = cp.pop("models")
+                                    converted.append(cp)
+                            agent_llm_dict["provider"] = converted
+                    agent_llm_conf = agent_llm_dict
+
+            # PRIORITY 2: Try "agent.llm" direct key (fallback for TOML config)
+            if not agent_llm_conf:
+                agent_llm_conf = system_app.config.get("agent.llm")
+
+            # PRIORITY 3: If not found, try "agent" -> "llm" (nested dict access)
+            if not agent_llm_conf:
+                agent_conf = system_app.config.get("agent")
+                if isinstance(agent_conf, dict):
+                    agent_llm_conf = agent_conf.get("llm")
+
+            # PRIORITY 4: Check for flattened keys (fallback)
+            if not agent_llm_conf:
+                flattened = system_app.config.get_all_by_prefix("agent.llm.")
+                if flattened:
+                    agent_llm_conf = {}
+                    prefix_len = len("agent.llm.")
+                    for k, v in flattened.items():
+                        agent_llm_conf[k[prefix_len:]] = v
+
+            # Parse models from Multi-Provider List Structure [[agent.llm.provider]]
+            if agent_llm_conf and isinstance(agent_llm_conf.get("provider"), list):
+                providers = agent_llm_conf.get("provider")
+                for p_conf in providers:
+                    if isinstance(p_conf, dict) and "model" in p_conf:
+                        p_models = p_conf.get("model")
+                        if isinstance(p_models, list):
+                            for m in p_models:
+                                if isinstance(m, dict) and "name" in m:
+                                    m_name = m.get("name")
+                                    # Add model name to types
+                                    types.add(m_name)
+                                    config_models_found = True
+
+        # 2. Only get models from controller if no config models found (fallback)
+        if not config_models_found:
+            models = await controller.get_all_instances(healthy_only=True)
+            for model in models:
+                worker_name, worker_type = model.model_name.split("@")
+                if worker_type == "llm" and worker_name not in [
+                    "codegpt_proxyllm",
+                    "text2sql_proxyllm",
+                ]:
+                    types.add(worker_name)
+
         return Result.succ(list(types))
 
     except Exception as e:
@@ -695,6 +911,10 @@ def message2Vo(message: dict, order, model_name) -> MessageVo:
 
 from .config_api import router as config_router
 from .tools_api import router as tools_router
+from .auth_api import router as auth_router
+from .users_api import router as users_router
 
 router.include_router(config_router, prefix="/v1", tags=["Config"])
 router.include_router(tools_router, prefix="/v1", tags=["Tools"])
+router.include_router(auth_router, prefix="/v1", tags=["Auth"])
+router.include_router(users_router, prefix="/v1", tags=["Users"])

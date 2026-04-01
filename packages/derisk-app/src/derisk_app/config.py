@@ -2,7 +2,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from derisk.configs.model_config import DATA_DIR
 from derisk.datasource.parameter import BaseDatasourceParameters
 from derisk.model.parameter import (
     ModelsDeployParameters,
@@ -147,7 +146,7 @@ class RagParameters(BaseParameters):
 class ServiceWebParameters(BaseParameters):
     host: str = field(default="0.0.0.0", metadata={"help": _("Webserver deploy host")})
     port: int = field(
-        default=5670, metadata={"help": _("Webserver deploy port, default is 5670")}
+        default=7777, metadata={"help": _("Webserver deploy port, default is 7777")}
     )
     light: Optional[bool] = field(
         default=False, metadata={"help": _("Run Webserver in light mode")}
@@ -207,11 +206,11 @@ class ServiceWebParameters(BaseParameters):
         metadata={"help": _("Whether to verify the SSL certificate of the database")},
     )
     default_thread_pool_size: Optional[int] = field(
-        default=None,
+        default=32,
         metadata={
             "help": _(
                 "The default thread pool size, If None, use default config of python "
-                "thread pool"
+                "thread pool. Recommended: 32 for SQLite, 64+ for MySQL/PostgreSQL"
             )
         },
     )
@@ -310,41 +309,36 @@ class SandboxConfigParameters(BaseParameters):
     )
     skill_dir: Optional[str] = field(
         default=None,
-        metadata={
-            "help": _(
-                "The sandbox skill dir. Defaults to DATA_DIR/skill for local sandbox."
-            )
-        },
+        metadata={"help": _("The sandbox skill dir.")},
     )
-
-    def __post_init__(self):
-        """Set default work_dir and skill_dir based on sandbox type if not provided."""
-        if self.work_dir is None:
-            if self.type == "local":
-                self.work_dir = "/Users/tuyang.yhj/Code/python/derisk/pilot"
-            else:
-                self.work_dir = "/home/ubuntu"
-        if self.skill_dir is None:
-            if self.type == "local":
-                self.skill_dir = os.path.join(DATA_DIR, "skill")
-            else:
-                self.skill_dir = "/mnt/derisk/skills"
 
     oss_ak: Optional[str] = field(
         default=None,
-        metadata={"help": _("The sandbox oss ak.")},
+        metadata={
+            "help": _("Deprecated: Use FileStorageClient instead. The sandbox oss ak.")
+        },
     )
     oss_sk: Optional[str] = field(
         default=None,
-        metadata={"help": _("The sandbox oss sk.")},
+        metadata={
+            "help": _("Deprecated: Use FileStorageClient instead. The sandbox oss sk.")
+        },
     )
     oss_endpoint: Optional[str] = field(
         default=None,
-        metadata={"help": _("The sandbox oss endpoint.")},
+        metadata={
+            "help": _(
+                "Deprecated: Use FileStorageClient instead. The sandbox oss endpoint."
+            )
+        },
     )
     oss_bucket_name: Optional[str] = field(
         default=None,
-        metadata={"help": _("The sandbox oss bucket.")},
+        metadata={
+            "help": _(
+                "Deprecated: Use FileStorageClient instead. The sandbox oss bucket."
+            )
+        },
     )
 
 
