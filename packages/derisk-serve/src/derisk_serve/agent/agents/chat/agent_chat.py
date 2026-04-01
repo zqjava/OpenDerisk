@@ -1,10 +1,12 @@
 import asyncio
 import json
 import logging
+import traceback
 import uuid
+import warnings
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from typing import Union, Optional, List, Dict, Any, Type, Tuple, Callable, Awaitable
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import orjson
 from fastapi import BackgroundTasks
@@ -21,8 +23,13 @@ from derisk.agent import (
     GptsMemory,
     LLMConfig,
     ResourceType,
+    ActionOutput,
+    Agent,
+    AgentMessage,
+    ProfileConfig,
     ShortTermMemory,
 )
+from derisk.agent.core.agent_alias import AgentAliasManager, resolve_agent_name
 from derisk.agent.core.base_team import ManagerAgent
 from derisk.agent.core.memory.gpts import GptsMessage
 from derisk.agent.core.plan.react.team_react_plan import AutoTeamContext
@@ -171,10 +178,6 @@ class GlobalSandboxManagerCache:
                 logger.exception(
                     f"[Sandbox]清理sandbox_manager失败，key={key}, error={str(e)}"
                 )
-        else:
-            logger.info(
-                f"[Sandbox]清理sandbox_manager（无client），key={key}, 当前运行中沙箱数量={len(cls._repository)}"
-            )
 
 
 class AgentChat(BaseComponent, ABC):
@@ -204,8 +207,19 @@ class AgentChat(BaseComponent, ABC):
             kanban_db_storage=kanban_db_storage,
             todo_db_storage=todo_db_storage,
         )
+
+        # Register GptsMemory to system_app for file_dispatch.py to access
+        try:
+            from derisk.component import ComponentType
+
+            self.system_app.register_instance(self.memory)
+            logger.info("[AgentChat] Registered GptsMemory to system_app")
+        except Exception as e:
+            logger.warning(f"[AgentChat] Failed to register GptsMemory: {e}")
+
         self.llm_provider = llm_provider
         self.agent_memory_map = {}
+        self._running_tasks: Dict[str, asyncio.Task] = {}
 
         super().__init__(system_app)
         self.system_app = system_app
@@ -249,13 +263,40 @@ class AgentChat(BaseComponent, ABC):
             SandboxManager 实例或 None
         """
         # 检查是否需要沙箱
+        # 处理 team_context 可能是字典或对象的情况
+        use_sandbox_flag = False
+        if app.team_context:
+            if hasattr(app.team_context, "use_sandbox"):
+                use_sandbox_flag = app.team_context.use_sandbox
+            elif isinstance(app.team_context, dict):
+                use_sandbox_flag = app.team_context.get("use_sandbox", False)
+
+        # 检查系统级 sandbox 配置
+        # 当系统配置了 sandbox type 时，即使应用级 use_sandbox_flag 为 False，
+        # 也应该创建 sandbox_manager，确保 sandbox 配置能正确注入到 system prompt
+        app_config = self.system_app.config.configs.get("app_config")
+        sandbox_config: Optional[SandboxConfigParameters] = (
+            app_config.sandbox if app_config else None
+        )
+        system_sandbox_enabled = bool(sandbox_config and sandbox_config.type)
+
         if not (
-            (need_sandbox and app.team_context.use_sandbox)
+            (need_sandbox and (use_sandbox_flag or system_sandbox_enabled))
             or await self._have_agent_skill(
                 app, context.extra.get("dynamic_resources", [])
             )
         ):
+            logger.debug(
+                f"[Sandbox] Skip sandbox creation: need_sandbox={need_sandbox}, "
+                f"use_sandbox_flag={use_sandbox_flag}, system_sandbox_enabled={system_sandbox_enabled}, "
+                f"has_agent_skill={await self._have_agent_skill(app, context.extra.get('dynamic_resources', []))}"
+            )
             return None
+
+        logger.info(
+            f"[Sandbox] Creating sandbox_manager: need_sandbox={need_sandbox}, "
+            f"use_sandbox_flag={use_sandbox_flag}, system_sandbox_enabled={system_sandbox_enabled}"
+        )
 
         # 检查缓存中是否已有该会话的 sandbox_manager
         sandbox_key = f"{context.conv_id}_{context.staff_no}"
@@ -267,6 +308,19 @@ class AgentChat(BaseComponent, ABC):
         async def _create_sandbox_manager() -> SandboxManager:
             app_config = self.system_app.config.configs.get("app_config")
             sandbox_config: Optional[SandboxConfigParameters] = app_config.sandbox
+
+            file_storage_client = None
+            try:
+                from derisk.core.interface.file import FileStorageClient
+
+                file_storage_client = FileStorageClient.get_instance(self.system_app)
+                if file_storage_client:
+                    logger.info(
+                        f"[AgentChat] FileStorageClient retrieved for sandbox creation"
+                    )
+            except Exception as e:
+                logger.warning(f"[AgentChat] Failed to get FileStorageClient: {e}")
+
             sandbox_client = await AutoSandbox.create(
                 user_id=context.staff_no or sandbox_config.user_id,
                 agent=sandbox_config.agent_name,
@@ -274,6 +328,7 @@ class AgentChat(BaseComponent, ABC):
                 template=sandbox_config.template_id,
                 work_dir=sandbox_config.work_dir,
                 skill_dir=sandbox_config.skill_dir,
+                file_storage_client=file_storage_client,
                 oss_ak=sandbox_config.oss_ak,
                 oss_sk=sandbox_config.oss_sk,
                 oss_endpoint=sandbox_config.oss_endpoint,
@@ -326,9 +381,26 @@ class AgentChat(BaseComponent, ABC):
         Args:
             conv_session_id:会话id
             agent_conv_id:对话id
+            err_msg:错误信息（如果是对话中断，包含中断信息）
         """
         logger.info(f"Agent chat end, save conversation {agent_conv_id}!")
         try:
+            # 检查对话状态，如果是 RUNNING 则根据 err_msg 更新
+            try:
+                conv_entity = self.gpts_conversations.get_by_conv_id(agent_conv_id)
+                if conv_entity and conv_entity.state == Status.RUNNING.value:
+                    if err_msg:
+                        if "中断" in err_msg or "interrupt" in err_msg.lower():
+                            new_state = Status.INTERRUPTED.value
+                        else:
+                            new_state = Status.FAILED.value
+                        self.gpts_conversations.update(agent_conv_id, new_state)
+                        logger.info(
+                            f"Updated conversation {agent_conv_id} state to {new_state}"
+                        )
+            except Exception as state_error:
+                logger.error(f"Failed to update conversation state: {state_error}")
+
             """统一保存对话结果的逻辑"""
             if not final_message:
                 try:
@@ -373,7 +445,7 @@ class AgentChat(BaseComponent, ABC):
 
             # Deliver to channel if configured (handles cron job message delivery)
             if not err_msg:
-                content = final_report # 只看final_report 不看final_message
+                content = final_report  # 只看final_report 不看final_message
                 content = content.lstrip() if content else None
                 if content:
                     await self._deliver_to_channel_if_configured(
@@ -626,13 +698,6 @@ class AgentChat(BaseComponent, ABC):
         )
         ext_info["incremental"] = vis_protocol.incremental
 
-        await self.memory.init(
-            agent_conv_id,
-            app_code=gpts_name,
-            history_messages=history_messages,
-            start_round=history_message_count,
-            vis_converter=vis_protocol,
-        )
         #########################################################
 
         with root_tracer.start_span("agent.conversation.state_check"):
@@ -654,62 +719,72 @@ class AgentChat(BaseComponent, ABC):
                     message_round = last_message.rounds + 1
                     last_speaker_name = last_message.sender_name
 
-                    # 恢复起来的会话，需要加载历史消息到记忆中
-                    await self.memory.load_persistent_memory(agent_conv_id)
+        await self.memory.init(
+            agent_conv_id,
+            app_code=gpts_name,
+            history_messages=history_messages,
+            start_round=history_message_count,
+            vis_converter=vis_protocol,
+        )
 
-            historical_dialogues: List[GptsMessage] = []
-            if not is_retry_chat:
-                # Create a new gpts conversation record
+        historical_dialogues: List[GptsMessage] = []
+        if is_retry_chat:
+            # 恢复起来的会话，需要加载历史消息到记忆中
+            await self.memory.load_persistent_memory(agent_conv_id)
 
-                ## When creating a new gpts conversation record, determine whether to
-                # include the history of previous topics according to the application
-                # definition.
-                if gpt_app.keep_start_rounds > 0 or gpt_app.keep_end_rounds > 0:
-                    if gpts_conversations and len(gpts_conversations) > 0:
-                        rely_conversations = []
-                        if gpt_app.keep_start_rounds + gpt_app.keep_end_rounds < len(
-                            gpts_conversations
-                        ):
-                            if gpt_app.keep_start_rounds > 0:
-                                front = gpts_conversations[gpt_app.keep_start_rounds :]
-                                rely_conversations.extend(front)
-                            if gpt_app.keep_end_rounds > 0:
-                                back = gpts_conversations[-gpt_app.keep_end_rounds :]
-                                rely_conversations.extend(back)
-                        else:
-                            rely_conversations = gpts_conversations
-                        for gpts_conversation in rely_conversations:
-                            temps: List[GptsMessage] = await self.memory.get_messages(
-                                gpts_conversation.conv_id
-                            )
-                            if temps and len(temps) > 1:
-                                historical_dialogues.append(temps[0])
-                                historical_dialogues.append(temps[-1])
+        if not is_retry_chat:
+            # Create a new gpts conversation record
 
-                user_goal = json.dumps(user_query.to_dict(), ensure_ascii=False)
-                user_goal = user_goal[: min(len(user_goal), 6500)] if user_goal else ""
-                await self.gpts_conversations.a_add(
-                    GptsConversationsEntity(
-                        conv_id=agent_conv_id,
-                        conv_session_id=conv_id,
-                        user_goal=user_goal,
-                        gpts_name=gpts_name,
-                        team_mode=gpt_app.team_mode,
-                        state=Status.RUNNING.value,
-                        max_auto_reply_round=0,
-                        auto_reply_count=0,
-                        user_code=user_code,
-                        sys_code=sys_code,
-                        vis_render=vis_render,
-                        extra=orjson.dumps(ext_info).decode(),
-                    )
+            ## When creating a new gpts conversation record, determine whether to
+            # include the history of previous topics according to the application
+            # definition.
+            if gpt_app.keep_start_rounds > 0 or gpt_app.keep_end_rounds > 0:
+                if gpts_conversations and len(gpts_conversations) > 0:
+                    rely_conversations = []
+                    if gpt_app.keep_start_rounds + gpt_app.keep_end_rounds < len(
+                        gpts_conversations
+                    ):
+                        if gpt_app.keep_start_rounds > 0:
+                            front = gpts_conversations[gpt_app.keep_start_rounds :]
+                            rely_conversations.extend(front)
+                        if gpt_app.keep_end_rounds > 0:
+                            back = gpts_conversations[-gpt_app.keep_end_rounds :]
+                            rely_conversations.extend(back)
+                    else:
+                        rely_conversations = gpts_conversations
+                    for gpts_conversation in rely_conversations:
+                        temps: List[GptsMessage] = await self.memory.get_messages(
+                            gpts_conversation.conv_id
+                        )
+                        if temps and len(temps) > 1:
+                            historical_dialogues.append(temps[0])
+                            historical_dialogues.append(temps[-1])
+
+            user_goal = json.dumps(user_query.to_dict(), ensure_ascii=False)
+            user_goal = user_goal[: min(len(user_goal), 6500)] if user_goal else ""
+            await self.gpts_conversations.a_add(
+                GptsConversationsEntity(
+                    conv_id=agent_conv_id,
+                    conv_session_id=conv_id,
+                    user_goal=user_goal,
+                    gpts_name=gpts_name,
+                    team_mode=gpt_app.team_mode,
+                    state=Status.RUNNING.value,
+                    max_auto_reply_round=0,
+                    auto_reply_count=0,
+                    user_code=user_code,
+                    sys_code=sys_code,
+                    vis_render=vis_render,
+                    extra=orjson.dumps(ext_info).decode(),
                 )
+            )
 
         # init agent memory
         agent_memory = self.get_or_build_derisk_memory(
             conv_id, gpt_app.app_code, user_code, gpt_app.team_context
         )
         file_handle = None
+        task = None
         try:
             task = asyncio.create_task(
                 self._inner_chat(
@@ -729,6 +804,8 @@ class AgentChat(BaseComponent, ABC):
                     **ext_info,
                 )
             )
+            # 注册任务以便可以通过 stop_chat 取消
+            self.register_running_task(conv_id, task)
             ## TEST FILE WRITE
             WRITE_TO_FILE = True
             if WRITE_TO_FILE:
@@ -742,7 +819,28 @@ class AgentChat(BaseComponent, ABC):
                 )
                 file_handle = open(filename, "w", encoding="utf-8")
             if stream == True:
-                async for chunk in self._chat_messages(agent_conv_id):
+                stream_complete = False
+
+                # Check if task failed immediately
+                await asyncio.sleep(0.1)  # Give task a moment to start
+                if task.done() and task.exception():
+                    exc = task.exception()
+                    logger.error(f"Task failed immediately: {exc}")
+                    raise exc
+
+                # 首先发送 session metadata，包含 conv_session_id 和 conv_uid
+                metadata_content = orjson.dumps(
+                    {
+                        "vis": {
+                            "type": "metadata",
+                            "conv_session_id": conv_id,
+                            "conv_uid": agent_conv_id,
+                        }
+                    }
+                ).decode("utf-8")
+                yield task, f"data:{metadata_content}\n\n", agent_conv_id
+
+                async for chunk in self._chat_messages(agent_conv_id, task):
                     if chunk and len(chunk) > 0:
                         try:
                             content = orjson.dumps({"vis": chunk}).decode("utf-8")
@@ -757,19 +855,17 @@ class AgentChat(BaseComponent, ABC):
                                 f"get messages {gpts_name} Exception!" + str(e)
                             )
                             yield task, f"data: {str(e)}\n\n", agent_conv_id
+                    stream_complete = True
 
-                # 5. 最终处理
-                if task.done() and task.exception():
-                    # 如果任务有异常，返回错误
+                if not stream_complete and task.done() and task.exception():
                     logger.exception(f"agent chat exception!{conv_id}")
                     raise task.exception()
                 else:
-                    # 正常结束
                     yield task, _format_vis_msg("[DONE]"), agent_conv_id
             else:
                 logger.info("非流式消息输出!")
                 last_chunk = None, None, None
-                async for chunk in self._chat_messages(agent_conv_id):
+                async for chunk in self._chat_messages(agent_conv_id, task):
                     if chunk and len(chunk) > 0:
                         if not first_chunk_time:
                             yield task, "", agent_conv_id
@@ -793,13 +889,43 @@ class AgentChat(BaseComponent, ABC):
                 yield last_chunk
             succeed = True
         except asyncio.CancelledError:
-            # 取消时不立即回调
-            logger.info("Generator cancelled, delaying callback")
+            logger.info(f"Chat interrupted by user for conv_id: {conv_id}")
+            # 推送中断消息
+            interrupt_content = orjson.dumps(
+                {
+                    "vis": {
+                        "type": "interrupt",
+                        "content": "对话已被用户中断",
+                    }
+                }
+            ).decode("utf-8")
+            yield task, f"data:{interrupt_content}\n\n", agent_conv_id
+            yield task, _format_vis_msg("[DONE]"), agent_conv_id
+            # 保存中断状态
+            succeed = False
             raise
         except Exception as e:
-            logger.exception(f"Agent chat have error!{str(e)}")
-            raise e
-            # yield task, str(e), agent_conv_id
+            import traceback
+
+            error_trace = traceback.format_exc()
+            logger.error(f"Agent chat have error! {str(e)}\n{error_trace}")
+
+            try:
+                if task and not task.done():
+                    task.cancel()
+            except Exception:
+                pass
+
+            error_content = orjson.dumps(
+                {
+                    "vis": {
+                        "type": "error",
+                        "content": f"对话发生错误: {str(e)}",
+                    }
+                }
+            ).decode("utf-8")
+            yield task, f"data:{error_content}\n\n", agent_conv_id
+            yield task, _format_vis_msg("[DONE]"), agent_conv_id
         finally:
             digest(
                 CHAT_LOGGER,
@@ -813,14 +939,39 @@ class AgentChat(BaseComponent, ABC):
                 if first_chunk_time
                 else 0,
             )
+            # 取消注册任务
+            self.unregister_running_task(conv_id)
             # 确保文件句柄关闭
             if file_handle:
                 file_handle.close()
+
+    async def _save_message_to_db(self, msg):
+        """保存消息到数据库.
+
+        Args:
+            msg: GptsMessage 消息对象
+        """
+        try:
+            self.gpts_messages_dao.update_message(msg)
+        except Exception as e:
+            logger.error(f"Failed to save message {msg.message_id}: {e}")
 
     def get_or_build_agent_memory(self, conv_id: str, derisks_name: str) -> AgentMemory:
         session_memory = ShortTermMemory(buffer_size=10)
         agent_memory = AgentMemory(session_memory, gpts_memory=self.memory)
         return agent_memory
+
+    async def _save_message_to_db(self, msg):
+        """保存消息到数据库.
+
+        Args:
+            msg: GptsMessage 消息对象
+        """
+        try:
+            self.gpts_messages_dao.update_message(msg)
+            logger.debug(f"Saved message {msg.message_id} to database")
+        except Exception as e:
+            logger.error(f"Failed to save message {msg.message_id}: {e}")
 
     @trace("agent.get_or_build_memory", requires=["conv_id", "agent_id"])
     def get_or_build_derisk_memory(
@@ -989,15 +1140,34 @@ class AgentChat(BaseComponent, ABC):
                 if employees is not None and len(employees) == 1:
                     recipient = employees[0]
                 else:
+                    # 解析Agent别名（历史数据兼容）
+                    resolved_agent_type = resolve_agent_name(app.agent)
+
+                    if resolved_agent_type != app.agent:
+                        logger.info(
+                            f"[AgentChat] Resolved agent alias: {app.agent} -> {resolved_agent_type}"
+                        )
+
                     cls: Type[ConversableAgent] = self.agent_manage.get_by_name(
-                        app.agent
+                        resolved_agent_type
+                    )
+
+                    if resolved_agent_type != app.agent:
+                        logger.info(
+                            f"[AgentChat] Resolved agent alias: {app.agent} -> {resolved_agent_type}"
+                        )
+
+                    cls: Type[ConversableAgent] = self.agent_manage.get_by_name(
+                        resolved_agent_type
                     )
 
                     ## 处理agent资源内容
                     # depend_resource = await blocking_func_to_async(
                     #     CFG.SYSTEM_APP, rm.build_resource, app.all_resources
                     # )
-                    depend_resource = await rm.a_build_resource(real_all_resources)
+                    depend_resource = await rm.a_build_resource(
+                        real_all_resources, ignore_missing=True
+                    )
 
                     agent_context = deepcopy(context)
                     agent_context.agent_app_code = app.app_code
@@ -1060,7 +1230,9 @@ class AgentChat(BaseComponent, ABC):
                     # depend_resource = await blocking_func_to_async(
                     #     CFG.SYSTEM_APP, rm.build_resource, app.all_resources
                     # )
-                    depend_resource = await rm.a_build_resource(real_all_resources)
+                    depend_resource = await rm.a_build_resource(
+                        real_all_resources, ignore_missing=True
+                    )
                     manager.bind(depend_resource)
 
                 agent_context = deepcopy(context)
@@ -1374,15 +1546,23 @@ class AgentChat(BaseComponent, ABC):
                         except Exception as e:
                             logger.warning(f"Failed to process MCP resource: {e}")
                     else:
-                        dynamic_resources.append(
-                            AgentResource.from_dict(
-                                {
-                                    "type": sub_type,
-                                    "name": f"用户选择了[{sub_type}]资源",
-                                    "value": param_value,
-                                }
+                        # Skip FILE_RESOURCES (common_file, text_file, excel_file, image_file)
+                        # These are handled separately in _dispatch_uploaded_files
+                        if sub_type not in FILE_RESOURCES:
+                            dynamic_resources.append(
+                                AgentResource.from_dict(
+                                    {
+                                        "type": sub_type,
+                                        "name": f"用户选择了[{sub_type}]资源",
+                                        "value": param_value,
+                                    }
+                                )
                             )
-                        )
+                        else:
+                            logger.info(
+                                f"Skipping file resource type {sub_type} in chat_in_params_to_resource, "
+                                f"will be handled in _dispatch_uploaded_files"
+                            )
 
                     if chat_in_param.sub_type == DeriskSkillResource.type():
                         skill_param_value = chat_in_param.param_value
@@ -1629,6 +1809,119 @@ class AgentChat(BaseComponent, ABC):
                         logger.info("用户指定了模型MaxTokens，优先使用")
         return llm_context, env_context
 
+    async def _dispatch_uploaded_files(
+        self,
+        chat_in_params: Optional[List[ChatInParamValue]],
+        conv_id: str,
+        user_query: HumanMessage,
+        staff_no: Optional[str] = None,
+    ) -> Optional[HumanMessage]:
+        """处理上传的文件，根据类型分流.
+
+        - 图片/音频/视频文件 → 直接给多模态模型消费
+        - 其他文件 → 加入AgentFileSystem并同步写入沙箱
+
+        Args:
+            chat_in_params: 对话输入参数
+            conv_id: 会话ID
+            user_query: 用户消息
+            staff_no: 用户工号 (用于获取 sandbox)
+
+        Returns:
+            更新后的用户消息（如果需要），如果无需更新则返回None
+        """
+        if not chat_in_params:
+            return None
+
+        file_resources = []
+        for param in chat_in_params:
+            if param.param_type == "resource":
+                try:
+                    logger.debug(
+                        f"[FileDispatch] Processing param: sub_type={param.sub_type}, param_value type={type(param.param_value)}"
+                    )
+
+                    if isinstance(param.param_value, str):
+                        value_data = json.loads(param.param_value)
+                    else:
+                        value_data = param.param_value
+
+                    logger.debug(
+                        f"[FileDispatch] Parsed value_data type={type(value_data)}, content={value_data}"
+                    )
+
+                    if isinstance(value_data, list):
+                        file_resources.extend(value_data)
+                    elif isinstance(value_data, dict):
+                        file_resources.append(value_data)
+                except Exception as e:
+                    logger.warning(f"Failed to parse file resource: {e}")
+
+        logger.info(
+            f"[FileDispatch] Total file_resources count: {len(file_resources)}, content: {file_resources}"
+        )
+
+        if not file_resources:
+            return None
+
+        sandbox_client = None
+        # 使用与 _get_or_create_sandbox_manager 相同的 key 格式
+        sandbox_key = f"{conv_id}_{staff_no or 'default'}"
+        sandbox_manager = GlobalSandboxManagerCache.get(sandbox_key)
+        if sandbox_manager and sandbox_manager.client:
+            sandbox_client = sandbox_manager.client
+
+        from derisk_serve.agent.utils.file_dispatch import (
+            process_uploaded_files,
+            FileDispatchType,
+        )
+        from derisk.core.interface.media import MediaContent
+        from derisk.core.interface.file import FileStorageClient
+
+        # 获取 FileStorageClient 实例
+        file_storage_client = None
+        try:
+            file_storage_client = FileStorageClient.get_instance(
+                self.system_app, default_component=None
+            )
+        except Exception as e:
+            logger.debug(f"FileStorageClient not available: {e}")
+
+        media_contents, file_infos = await process_uploaded_files(
+            file_resources=file_resources,
+            conv_id=conv_id,
+            sandbox_client=sandbox_client,
+            system_app=self.system_app,
+            file_storage_client=file_storage_client,
+        )
+
+        if not media_contents:
+            return None
+
+        existing_content = []
+        if isinstance(user_query.content, str) and user_query.content:
+            existing_content.append(MediaContent.build_text(user_query.content))
+        elif isinstance(user_query.content, list):
+            existing_content = user_query.content
+
+        new_content = media_contents + existing_content
+
+        multimodal_files = [
+            f for f in file_infos if f.dispatch_type == FileDispatchType.MULTIMODAL
+        ]
+        sandbox_files = [
+            f for f in file_infos if f.dispatch_type == FileDispatchType.SANDBOX
+        ]
+
+        if multimodal_files:
+            logger.info(
+                f"[FileDispatch] Processed {len(multimodal_files)} multimodal files"
+            )
+        if sandbox_files:
+            logger.info(f"[FileDispatch] Processed {len(sandbox_files)} sandbox files")
+
+        return HumanMessage(content=new_content)
+
     async def _inner_chat(
         self,
         user_code: str,
@@ -1737,6 +2030,182 @@ class AgentChat(BaseComponent, ABC):
                 **ext_info,
             )
 
+            # 处理文件上传
+            # 优先使用 sandbox_file_refs（从 api_v1.py 传递过来）
+            # 如果 sandbox_file_refs 为空，才处理 chat_in_params
+            sandbox_file_refs = ext_info.get("sandbox_file_refs", [])
+            logger.info(
+                f"[AgentChat] sandbox_file_refs from ext_info: {len(sandbox_file_refs)} items"
+            )
+
+            if sandbox_file_refs:
+                # 处理 sandbox_file_refs（从 api_v1.py 传递过来）
+                sandbox_key = f"{conv_uid}_{staff_no or 'default'}"
+                sandbox_manager = GlobalSandboxManagerCache.get(sandbox_key)
+                logger.info(
+                    f"[AgentChat] sandbox_manager for key {sandbox_key}: {sandbox_manager is not None}"
+                )
+                if sandbox_manager and sandbox_manager.client:
+                    sandbox_client = sandbox_manager.client
+                    work_dir = sandbox_client.work_dir
+                    updated_refs = []
+
+                    # 确保上传目录存在
+                    uploads_dir = f"{work_dir}/uploads"
+
+                    for ref in sandbox_file_refs:
+                        if isinstance(ref, dict):
+                            file_name = ref.get("file_name", "")
+                            file_url = ref.get("url", "") or ""
+                            logger.info(
+                                f"[AgentChat] Processing ref: file_name={file_name}, "
+                                f"url={file_url[:100] if file_url else 'None/Empty'}, "
+                                f"has_url={bool(file_url)}, "
+                                f"is_http={file_url.startswith('http://') or file_url.startswith('https://') if file_url else False}"
+                            )
+                            if file_name:
+                                new_path = f"{uploads_dir}/{file_name}"
+                                ref["sandbox_path"] = new_path
+                                updated_refs.append(f"1. `{new_path}`")
+                                logger.info(
+                                    f"[AgentChat] Updated sandbox_path: {new_path}"
+                                )
+
+                                # 实际写入文件到沙箱
+                                if file_url:
+                                    try:
+                                        import httpx
+                                        import os
+
+                                        content = None
+                                        actual_url = file_url
+
+                                        # 处理 derisk-fs:// URL
+                                        if file_url.startswith("derisk-fs://"):
+                                            try:
+                                                from derisk.core.interface.file import (
+                                                    FileStorageClient,
+                                                )
+
+                                                file_storage_client = (
+                                                    FileStorageClient.get_instance(
+                                                        self.system_app,
+                                                        default_component=None,
+                                                    )
+                                                )
+                                                if file_storage_client:
+                                                    actual_url = file_storage_client.get_public_url(
+                                                        file_url
+                                                    )
+                                                    logger.info(
+                                                        f"[AgentChat] Converted derisk-fs:// to public URL: {actual_url[:80]}..."
+                                                    )
+                                                else:
+                                                    logger.warning(
+                                                        f"[AgentChat] FileStorageClient not available for derisk-fs:// URL"
+                                                    )
+                                            except Exception as e:
+                                                logger.warning(
+                                                    f"[AgentChat] Failed to convert derisk-fs:// URL: {e}"
+                                                )
+
+                                        # 下载文件
+                                        if actual_url and (
+                                            actual_url.startswith("http://")
+                                            or actual_url.startswith("https://")
+                                        ):
+                                            logger.info(
+                                                f"[AgentChat] Downloading file from: {actual_url}"
+                                            )
+                                            async with httpx.AsyncClient(
+                                                timeout=60
+                                            ) as client:
+                                                response = await client.get(actual_url)
+                                                if response.status_code == 200:
+                                                    content = response.content
+                                                else:
+                                                    logger.warning(
+                                                        f"[AgentChat] Failed to download file: HTTP {response.status_code}"
+                                                    )
+                                        elif file_url.startswith("derisk-fs://"):
+                                            logger.warning(
+                                                f"[AgentChat] Could not convert derisk-fs:// URL to HTTP URL"
+                                            )
+                                        else:
+                                            logger.warning(
+                                                f"[AgentChat] Invalid URL format: {file_url[:50]}"
+                                            )
+
+                                        # 写入到沙箱目录
+                                        if content:
+                                            os.makedirs(uploads_dir, exist_ok=True)
+                                            with open(new_path, "wb") as f:
+                                                f.write(content)
+                                            logger.info(
+                                                f"[AgentChat] Wrote file to sandbox: {new_path}, size={len(content)}"
+                                            )
+                                    except Exception as e:
+                                        logger.error(
+                                            f"[AgentChat] Failed to write file to sandbox: {e}",
+                                            exc_info=True,
+                                        )
+                                else:
+                                    logger.warning(
+                                        f"[AgentChat] No URL to download file, file_name={file_name}"
+                                    )
+
+                    ext_info["sandbox_file_refs"] = sandbox_file_refs
+
+                    # 获取用户消息的文本内容
+                    user_text = ""
+                    if isinstance(user_query.content, str):
+                        user_text = user_query.content
+                    elif isinstance(user_query.content, list):
+                        # 多模态消息，提取文本部分
+                        for item in user_query.content:
+                            if isinstance(item, dict) and item.get("type") == "text":
+                                # 字典格式
+                                user_text = item.get("object", {}).get("data", "")
+                                break
+                            elif hasattr(item, "type") and item.type == "text":
+                                # MediaContent 对象格式
+                                try:
+                                    user_text = item.get_text()
+                                except Exception:
+                                    user_text = (
+                                        str(item.object.data)
+                                        if hasattr(item, "object")
+                                        else ""
+                                    )
+                                break
+
+                    # 如果用户消息中没有文件提示，添加正确的文件提示
+                    if updated_refs and user_text:
+                        if "User uploaded files" not in user_text:
+                            new_file_info = (
+                                f"\n\n---\n\n📎 **User uploaded files**:\n"
+                                + "\n".join(updated_refs)
+                            )
+                            user_query = HumanMessage(content=user_text + new_file_info)
+                            logger.info(
+                                f"[AgentChat] Added file info to user message with correct paths"
+                            )
+                else:
+                    logger.warning(
+                        f"[AgentChat] sandbox_manager not available for key: {sandbox_key}"
+                    )
+            elif chat_in_params:
+                # 如果没有 sandbox_file_refs，才处理 chat_in_params
+                logger.info("[AgentChat] Processing files from chat_in_params")
+                file_dispatch_result = await self._dispatch_uploaded_files(
+                    chat_in_params=chat_in_params,
+                    conv_id=conv_uid,
+                    user_query=user_query,
+                    staff_no=staff_no,
+                )
+                if file_dispatch_result:
+                    user_query = file_dispatch_result
+
             if is_retry_chat:
                 # retry chat
                 self.gpts_conversations.update(conv_uid, Status.RUNNING.value)
@@ -1773,25 +2242,98 @@ class AgentChat(BaseComponent, ABC):
                 gpts_status = Status.WAITING.value
 
             self.gpts_conversations.update(conv_uid, gpts_status)
+        except asyncio.CancelledError:
+            logger.info(f"Chat cancelled by user for conv_uid: {conv_uid}")
+            gpts_status = Status.INTERRUPTED.value
+            self.gpts_conversations.update(conv_uid, gpts_status)
+
+            # 推送中断消息到消息队列
+            try:
+                interrupt_msg = {
+                    "type": "interrupt",
+                    "content": "对话已被用户中断",
+                }
+                await self.memory.push_message(
+                    conv_id=conv_uid,
+                    stream_msg=interrupt_msg,
+                )
+            except Exception as push_error:
+                logger.error(f"Failed to push interrupt message: {push_error}")
+
+            # 确保消息被写入数据库
+            try:
+                messages = await self.memory.get_messages(conv_uid)
+                for msg in messages:
+                    await self._save_message_to_db(msg)
+                logger.info(
+                    f"Saved {len(messages)} messages for interrupted conversation {conv_uid}"
+                )
+            except Exception as save_error:
+                logger.error(f"Failed to save messages on interrupt: {save_error}")
+
+            raise
         except Exception as e:
-            logger.error(f"chat abnormal termination！{conv_uid},{str(e)}", e)
-            self.gpts_conversations.update(conv_uid, Status.FAILED.value)
-            raise ValueError(f"The conversation is abnormal!{str(e)}")
+            import traceback
+
+            error_trace = traceback.format_exc()
+            logger.error(
+                f"chat abnormal termination！{conv_uid}, error: {str(e)}\n{error_trace}"
+            )
+            gpts_status = Status.FAILED.value
+            self.gpts_conversations.update(conv_uid, gpts_status)
+
+            try:
+                error_msg = {
+                    "type": "error",
+                    "content": f"[ERROR]对话发生错误: {str(e)}[/ERROR]",
+                    "error_detail": error_trace,
+                }
+                await self.memory.push_message(
+                    conv_id=conv_uid,
+                    stream_msg=error_msg,
+                )
+            except Exception as push_error:
+                logger.error(f"Failed to push error message: {push_error}")
+
+            raise ValueError(f"The conversation is abnormal! {str(e)}")
         finally:
             logger.info(f"inner chat final!{conv_uid}")
-            await self.memory.complete(conv_uid)
-            # 清理全局缓存中的沙箱管理器记录
+            try:
+                await self.memory.complete(conv_uid)
+            except Exception as complete_error:
+                logger.error(f"Failed to complete memory: {complete_error}")
             await self._cleanup_sandbox_manager(conv_uid, staff_no)
         return conv_uid
 
-    async def _chat_messages(self, conv_id: str):
+    async def _chat_messages(self, conv_id: str, task: Optional[asyncio.Task] = None):
+        """Yield chat messages from the queue with task monitoring.
+
+        If a task is provided and it fails during iteration, the error will be raised.
+        Also handles timeout cases to prevent infinite waiting.
+        """
         if not (iterator := await self.memory.queue_iterator(conv_id)):
             return
 
-        async for item in iterator:
-            # 可选：记录调试信息
-            yield item
-            await asyncio.sleep(0)
+        try:
+            async for item in iterator:
+                if task and task.done():
+                    exc = task.exception()
+                    if exc:
+                        import traceback
+
+                        logger.error(
+                            f"Background task failed: {exc}\n{traceback.format_exception(type(exc), exc, exc.__traceback__)}"
+                        )
+                        raise exc
+                yield item
+                await asyncio.sleep(0)
+        except Exception as e:
+            import traceback
+
+            logger.error(
+                f"Chat message iteration failed: {e}\n{traceback.format_exc()}"
+            )
+            raise
 
     async def stop_chat(self, conv_session_id: str, user_id: Optional[str] = None):
         """停止对话.
@@ -1802,6 +2344,18 @@ class AgentChat(BaseComponent, ABC):
         """
         logger.info(f"stop_chat conv_session_id:{conv_session_id}")
 
+        if not conv_session_id or not conv_session_id.strip():
+            logger.warning(f"conv_session_id is empty, skip stop_chat")
+            return
+
+        # 取消执行任务
+        task_key = conv_session_id
+        if task_key in self._running_tasks:
+            task = self._running_tasks.pop(task_key)
+            if task and not task.done():
+                task.cancel()
+                logger.info(f"Cancelled execution task for session {conv_session_id}")
+
         convs = await self.gpts_conversations.get_by_session_id_asc(conv_session_id)
         if convs:
             conv_id = convs[-1].conv_id
@@ -1809,7 +2363,8 @@ class AgentChat(BaseComponent, ABC):
             # 清理该会话的沙箱
             await self._cleanup_sandbox_manager(conv_id, user_id)
         else:
-            raise ValueError(f"未找到会话[{conv_session_id}]")
+            logger.warning(f"未找到会话[{conv_session_id}], may already stopped")
+            return
 
     async def stop_chat_with_conv_id(self, conv_id: str, user_id: Optional[str] = None):
         """停止对话.
@@ -1819,9 +2374,37 @@ class AgentChat(BaseComponent, ABC):
             user_id: 用户ID，用于清理沙箱
         """
         logger.info(f"stop_chat conv_id:{conv_id}")
+
+        # 取消执行任务
+        if conv_id in self._running_tasks:
+            task = self._running_tasks.pop(conv_id)
+            if task and not task.done():
+                task.cancel()
+                logger.info(f"Cancelled execution task for conv_id {conv_id}")
+
         await self.memory.stop(conv_id=conv_id)
         # 清理该会话的沙箱
         await self._cleanup_sandbox_manager(conv_id, user_id)
+
+    def register_running_task(self, session_id: str, task: asyncio.Task):
+        """注册正在运行的执行任务.
+
+        Args:
+            session_id: 会话ID
+            task: asyncio.Task 实例
+        """
+        self._running_tasks[session_id] = task
+        logger.info(f"Registered running task for session {session_id}")
+
+    def unregister_running_task(self, session_id: str):
+        """取消注册执行任务.
+
+        Args:
+            session_id: 会话ID
+        """
+        if session_id in self._running_tasks:
+            del self._running_tasks[session_id]
+            logger.info(f"Unregistered running task for session {session_id}")
 
     async def retry_chat(self, conv_id: str):
         """重试对话, 对于运行中且最终消息超过5分钟的 可以基于已有对话记录继续运行

@@ -14,6 +14,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set
 import asyncio
+import json
 import logging
 import uuid
 
@@ -21,6 +22,15 @@ from derisk.core import LLMClient
 
 from .improved_compaction import ImprovedSessionCompaction, CompactionConfig
 from .llm_utils import call_llm, LLMCaller
+from .tools_v2 import ToolRegistry, ToolResult
+
+from derisk.agent.interaction.interaction_protocol import (
+    InteractionRequest,
+    InteractionResponse,
+    InteractionType,
+    InteractionStatus,
+)
+from derisk.agent.interaction.interaction_gateway import InteractionGateway
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +44,7 @@ class AgentState(str, Enum):
     ACTING = "acting"
     RESPONDING = "responding"
     WAITING = "waiting"
+    WAITING_USER_INPUT = "waiting_user_input"
     ERROR = "error"
     TERMINATED = "terminated"
 
@@ -152,88 +163,6 @@ class PermissionChecker:
         import fnmatch
 
         return fnmatch.fnmatch(tool_name, pattern)
-
-
-class ToolRegistry:
-    """工具注册表"""
-
-    def __init__(self):
-        self._tools: Dict[str, Any] = {}
-
-    def register(self, tool: Any) -> "ToolRegistry":
-        # 优先使用 metadata.name，其次使用 name 属性
-        if hasattr(tool, "metadata") and hasattr(tool.metadata, "name"):
-            name = tool.metadata.name
-        elif hasattr(tool, "name"):
-            name = tool.name
-        else:
-            name = str(tool)
-        self._tools[name] = tool
-        logger.debug(f"[ToolRegistry] 注册工具: {name}")
-        return self
-
-    def get(self, name: str) -> Optional[Any]:
-        return self._tools.get(name)
-
-    async def execute(
-        self, name: str, args: Dict[str, Any], context: Optional[Dict[str, Any]] = None
-    ) -> "ToolResult":
-        """执行工具"""
-        from .tools_v2 import ToolResult
-
-        tool = self._tools.get(name)
-        if not tool:
-            return ToolResult(success=False, output="", error=f"工具不存在: {name}")
-
-        try:
-            if hasattr(tool, "execute"):
-                result = await tool.execute(args, context)
-                return result
-            elif callable(tool):
-                result = tool(**args)
-                if hasattr(result, "__await__"):
-                    result = await result
-                if isinstance(result, ToolResult):
-                    return result
-                return ToolResult(
-                    success=True,
-                    output=str(result) if result else "",
-                )
-            else:
-                return ToolResult(
-                    success=False, output="", error=f"工具不可执行: {name}"
-                )
-        except Exception as e:
-            logger.exception(f"[ToolRegistry] 工具执行异常: {name}")
-            return ToolResult(success=False, output="", error=str(e))
-
-    def list_tools(self) -> List[str]:
-        return list(self._tools.keys())
-
-    def list_all(self) -> List[Any]:
-        """列出所有工具对象"""
-        return list(self._tools.values())
-
-    def list_names(self) -> List[str]:
-        """列出所有工具名称"""
-        return list(self._tools.keys())
-
-    def get_openai_tools(self) -> List[Dict[str, Any]]:
-        result = []
-        for name, tool in self._tools.items():
-            if hasattr(tool, "get_openai_spec"):
-                result.append(tool.get_openai_spec())
-            else:
-                result.append(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "description": getattr(tool, "description", ""),
-                        },
-                    }
-                )
-        return result
 
 
 @dataclass
@@ -671,6 +600,9 @@ class AgentBase(ABC):
         tools: Optional[ToolRegistry] = None,
         permission_checker: Optional[PermissionChecker] = None,
         llm_client: Optional[Any] = None,
+        gpts_memory: Optional[Any] = None,
+        conv_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ):
         self.info = info
         self.memory = memory
@@ -687,6 +619,19 @@ class AgentBase(ABC):
         self._subagent_manager: Optional[SubagentManager] = None
         self._team_manager: Optional[TeamManager] = None
         self._auto_compaction: Optional[AutoCompactionManager] = None
+        self._interaction_gateway: Optional[InteractionGateway] = None
+
+        # GptsMemory引用（用于VIS推送）
+        self._gpts_memory = gpts_memory
+        self._conv_id = conv_id
+        self._session_id = session_id
+
+        # VIS推送状态
+        self._current_message_id: Optional[str] = None
+        self._accumulated_content: str = ""
+        self._accumulated_thinking: str = ""
+        self._is_first_chunk: bool = True
+        self._current_goal: str = ""
 
     async def initialize(self, context: Optional[Any] = None) -> None:
         """
@@ -722,6 +667,158 @@ class AgentBase(ABC):
 
     def set_team_manager(self, manager: TeamManager) -> None:
         self._team_manager = manager
+
+    def set_interaction_gateway(self, gateway: InteractionGateway) -> None:
+        """设置交互网关，用于 ask_user 暂停/恢复"""
+        self._interaction_gateway = gateway
+
+    def set_gpts_memory(
+        self,
+        gpts_memory: Any,
+        conv_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """设置 GptsMemory 引用，用于 VIS 推送"""
+        self._gpts_memory = gpts_memory
+        self._conv_id = conv_id
+        self._session_id = session_id
+
+    def _init_vis_state(self, message_id: str, goal: str = ""):
+        """初始化VIS推送状态"""
+        self._current_message_id = message_id
+        self._accumulated_content = ""
+        self._accumulated_thinking = ""
+        self._is_first_chunk = True
+        self._current_goal = goal
+
+    async def _push_vis_message(
+        self,
+        thinking: Optional[str] = None,
+        content: Optional[str] = None,
+        action_report: Optional[List[Any]] = None,
+        is_first_chunk: bool = False,
+        model: Optional[str] = None,
+        status: str = "running",
+        metrics: Optional[Dict[str, Any]] = None,
+    ):
+        """推送VIS消息到GptsMemory"""
+        if not self._gpts_memory or not self._conv_id:
+            logger.debug(f"[EnhancedAgentBase] GptsMemory未配置，跳过VIS推送")
+            return
+
+        if not self._current_message_id:
+            logger.warning("[EnhancedAgentBase] message_id未初始化，跳过VIS推送")
+            return
+
+        # 构建stream_msg
+        stream_msg = {
+            "uid": self._current_message_id,
+            "type": "incr",
+            "message_id": self._current_message_id,
+            "conv_id": self._conv_id,
+            "conv_session_uid": self._session_id or self._conv_id,
+            "goal_id": self._current_message_id,
+            "task_goal_id": self._current_message_id,
+            "task_goal": self._current_goal,
+            "app_code": self.info.name,
+            "sender": self.info.name,
+            "sender_name": self.info.name,
+            "sender_role": "assistant",
+            "model": model,
+            "thinking": thinking,
+            "content": content,
+            "avatar": None,
+            "observation": "",
+            "status": status,
+            "start_time": datetime.now(),
+            "metrics": metrics or {},
+            "prev_content": self._accumulated_content,
+        }
+
+        # 累积内容
+        if thinking:
+            self._accumulated_thinking += thinking
+        if content:
+            self._accumulated_content += content
+
+        # 添加action_report
+        if action_report:
+            stream_msg["action_report"] = action_report
+
+        try:
+            await self._gpts_memory.push_message(
+                self._conv_id,
+                stream_msg=stream_msg,
+                is_first_chunk=is_first_chunk,
+            )
+            self._is_first_chunk = False
+            logger.debug(f"[EnhancedAgentBase] VIS推送成功")
+        except Exception as e:
+            logger.warning(f"[EnhancedAgentBase] VIS推送失败: {e}")
+
+    def _build_action_output(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        result_content: str,
+        action_id: str,
+        success: bool = True,
+        state: str = "complete",
+        thought: Optional[str] = None,
+    ) -> List[Any]:
+        """构建ActionOutput对象"""
+        try:
+            from derisk.agent.core.action.base import ActionOutput
+        except ImportError:
+            logger.warning("[EnhancedAgentBase] ActionOutput导入失败")
+            return []
+
+        view = result_content[:2000] if result_content else ""
+
+        action_output = ActionOutput(
+            content=result_content,
+            action_id=action_id,
+            action=tool_name,
+            action_name=tool_name,
+            name=tool_name,
+            action_input=tool_args,
+            state=state,
+            is_exe_success=success,
+            view=view,
+            stream=False,
+            thought=thought or "",
+        )
+
+        return [action_output]
+
+    def _build_tool_start_action_output(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        action_id: str,
+        thought: Optional[str] = None,
+    ) -> List[Any]:
+        """构建工具开始时的ActionOutput"""
+        try:
+            from derisk.agent.core.action.base import ActionOutput
+        except ImportError:
+            logger.warning("[EnhancedAgentBase] ActionOutput导入失败")
+            return []
+
+        action_output = ActionOutput(
+            content="",
+            action_id=action_id,
+            action=tool_name,
+            action_name=tool_name,
+            name=tool_name,
+            action_input=tool_args,
+            state="running",
+            stream=True,
+            is_exe_success=True,
+            thought=thought or "",
+        )
+
+        return [action_output]
 
     def setup_auto_compaction(
         self,
@@ -790,7 +887,7 @@ class AgentBase(ABC):
         return []
 
     async def run(self, message: str, stream: bool = True) -> AsyncIterator[str]:
-        """主执行循环 - 支持四层压缩架构"""
+        """主执行循环 - 支持四层压缩架构和VIS推送"""
         # Layer 4: 启动新的对话轮次
         await self._start_conversation_round(message)
 
@@ -800,12 +897,36 @@ class AgentBase(ABC):
 
         final_response = ""
 
+        # 初始化VIS状态
+        message_id = str(uuid.uuid4().hex)
+        self._init_vis_state(message_id, goal=message)
+
         while self._current_step < self.info.max_steps:
             try:
+                # Check for pending user inputs from queue before thinking
+                if self._interaction_gateway and self._session_id:
+                    pending_inputs = (
+                        await self._interaction_gateway.get_pending_user_inputs(
+                            self._session_id, clear=True
+                        )
+                    )
+                    if pending_inputs:
+                        logger.info(
+                            f"[EnhancedAgent] Found {len(pending_inputs)} pending user inputs in queue"
+                        )
+                        for input_item in pending_inputs:
+                            self.add_message("user", input_item.content)
+                            message = input_item.content
+
                 thinking_output = []
                 if stream:
                     async for chunk in self.think(message):
                         thinking_output.append(chunk)
+                        # 推送thinking增量到VIS
+                        await self._push_vis_message(
+                            thinking=chunk,
+                            is_first_chunk=self._is_first_chunk,
+                        )
                         yield f"[THINKING] {chunk}"
 
                 self._state = AgentState.DECIDING
@@ -820,6 +941,11 @@ class AgentBase(ABC):
                     self._state = AgentState.RESPONDING
                     if decision.content:
                         final_response = decision.content
+                        # 推送最终响应到VIS
+                        await self._push_vis_message(
+                            content=decision.content,
+                            status="complete",
+                        )
                         yield decision.content
                         self.add_message("assistant", decision.content)
                     break
@@ -857,6 +983,32 @@ class AgentBase(ABC):
                         },
                     )
 
+                    # 生成工具执行的 action_id
+                    action_id = (
+                        tool_call_id
+                        or f"call_{decision.tool_name}_{uuid.uuid4().hex[:8]}"
+                    )
+
+                    # 推送工具开始到VIS
+                    thought_content = (
+                        "".join(thinking_output) if thinking_output else None
+                    )
+                    await self._push_vis_message(
+                        action_report=self._build_tool_start_action_output(
+                            tool_name=decision.tool_name,
+                            tool_args=decision.tool_args or {},
+                            action_id=action_id,
+                            thought=thought_content,
+                        ),
+                        is_first_chunk=False,
+                    )
+
+                    # yield 工具开始标记
+                    tool_args_json = json.dumps(
+                        decision.tool_args or {}, ensure_ascii=False
+                    )
+                    yield f"\n[TOOL_START:{decision.tool_name}:{action_id}:{tool_args_json}]"
+
                     # 执行工具
                     result = await self.act(decision)
 
@@ -877,22 +1029,137 @@ class AgentBase(ABC):
                         f"[AgentBase] 工具执行完成: {decision.tool_name}, 成功={result.success}, 输出长度={len(tool_output)}"
                     )
 
-                    yield f"\n[TOOL: {decision.tool_name}]\n{tool_output}"
-                    message = tool_output
+                    # 推送工具结果到VIS
+                    action_outputs = self._build_action_output(
+                        tool_name=decision.tool_name,
+                        tool_args=decision.tool_args or {},
+                        result_content=tool_output,
+                        action_id=action_id,
+                        success=result.success,
+                        state="complete" if result.success else "failed",
+                        thought=thought_content,
+                    )
+                    await self._push_vis_message(
+                        content=tool_output,
+                        action_report=action_outputs,
+                        is_first_chunk=False,
+                    )
+
+                    # yield 工具结果标记
+                    result_meta = json.dumps(
+                        {"success": result.success}, ensure_ascii=False
+                    )
+                    yield f"\n[TOOL_RESULT:{decision.tool_name}:{action_id}:{result_meta}]\n{tool_output}"
+
+                    # === HIL: ask_user 暂停/恢复机制 ===
+                    if result.metadata.get("ask_user") and result.metadata.get(
+                        "terminate"
+                    ):
+                        request_id = result.metadata.get(
+                            "request_id", f"ask_{uuid.uuid4().hex[:8]}"
+                        )
+                        self._state = AgentState.WAITING_USER_INPUT
+                        logger.info(
+                            f"[AgentBase] ask_user detected, pausing for user input. request_id={request_id}"
+                        )
+
+                        # yield ask_user 事件标记，供 Runtime/SSE 层识别
+                        yield f"\n[ASK_USER:{request_id}]"
+
+                        if self._interaction_gateway:
+                            # 构造 InteractionRequest 并等待用户响应
+                            interaction_request = InteractionRequest(
+                                request_id=request_id,
+                                interaction_type=InteractionType.ASK,
+                                title=result.metadata.get(
+                                    "header", "Needs your confirmation"
+                                ),
+                                message=json.dumps(
+                                    result.metadata.get("questions", []),
+                                    ensure_ascii=False,
+                                ),
+                                session_id=getattr(self, "_session_id", None),
+                                agent_name=self.info.name,
+                                tool_name=decision.tool_name,
+                                step_index=self._current_step,
+                                metadata={
+                                    "questions": result.metadata.get("questions", []),
+                                    "header": result.metadata.get("header", ""),
+                                },
+                            )
+
+                            try:
+                                response = (
+                                    await self._interaction_gateway.send_and_wait(
+                                        interaction_request
+                                    )
+                                )
+
+                                self._state = AgentState.THINKING
+                                logger.info(
+                                    f"[AgentBase] User responded to ask_user request_id={request_id}, status={response.status}"
+                                )
+
+                                if response.status in (
+                                    InteractionStatus.CANCELLED,
+                                    InteractionStatus.TIMEOUT,
+                                ):
+                                    yield f"\n[ASK_USER_CANCELLED:{request_id}]"
+                                    break
+
+                                # 将用户响应构造为消息，继续循环
+                                user_response_content = (
+                                    response.user_message
+                                    or response.input_value
+                                    or response.choice
+                                    or "confirmed"
+                                )
+                                self.add_message("user", user_response_content)
+                                message = user_response_content
+                                self._current_step += 1
+                                continue
+                            except Exception as e:
+                                logger.error(
+                                    f"[AgentBase] Interaction gateway error: {e}"
+                                )
+                                self._state = AgentState.THINKING
+                                message = f"[User interaction failed: {str(e)}]"
+                        else:
+                            # 无 gateway 时，工具输出本身包含 VIS 渲染，
+                            # 前端会通过 handleChat 直接提交用户响应，
+                            # 此时 terminate=True 意味着本轮循环结束
+                            logger.info(
+                                f"[AgentBase] No interaction gateway, terminating loop for ask_user"
+                            )
+                            break
+                    else:
+                        message = tool_output
 
                 elif decision.type == DecisionType.SUBAGENT:
                     self._state = AgentState.ACTING
                     result = await self._delegate_to_subagent(decision)
+                    # 推送子Agent结果到VIS
+                    await self._push_vis_message(
+                        content=result.output,
+                        is_first_chunk=False,
+                    )
                     yield f"\n[SUBAGENT: {decision.subagent_name}]\n{result.output}"
                     message = result.output
 
                 elif decision.type == DecisionType.TEAM_TASK:
                     self._state = AgentState.ACTING
                     result = await self._assign_team_task(decision)
+                    # 推送团队任务结果到VIS
+                    await self._push_vis_message(
+                        content=result.output,
+                        is_first_chunk=False,
+                    )
                     yield f"\n[TEAM TASK]\n{result.output}"
                     message = result.output
 
                 elif decision.type == DecisionType.TERMINATE:
+                    # 推送终止状态到VIS
+                    await self._push_vis_message(status="complete")
                     break
 
                 self._current_step += 1
@@ -902,7 +1169,13 @@ class AgentBase(ABC):
 
             except Exception as e:
                 self._state = AgentState.ERROR
-                yield f"\n[ERROR] {str(e)}"
+                error_msg = str(e)
+                # 推送错误到VIS
+                await self._push_vis_message(
+                    content=error_msg,
+                    status="error",
+                )
+                yield f"\n[ERROR] {error_msg}"
                 break
 
         # Layer 4: 完成对话轮次
@@ -977,6 +1250,9 @@ class ProductionAgent(AgentBase):
         tool_registry: Optional[ToolRegistry] = None,
         memory: Optional[Any] = None,
         use_persistent_memory: bool = False,
+        gpts_memory: Optional[Any] = None,
+        conv_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         **kwargs,
     ):
         # llm_adapter is an alias for llm_client (used by BaseBuiltinAgent)
@@ -992,23 +1268,63 @@ class ProductionAgent(AgentBase):
         if memory is not None:
             base_kwargs["memory"] = memory
 
+        # Pass gpts_memory and related params for VIS push
+        if gpts_memory is not None:
+            base_kwargs["gpts_memory"] = gpts_memory
+        if conv_id is not None:
+            base_kwargs["conv_id"] = conv_id
+        if session_id is not None:
+            base_kwargs["session_id"] = session_id
+
+        # Pass any remaining kwargs
+        base_kwargs.update(kwargs)
+
         super().__init__(info, llm_client=llm_client, **base_kwargs)
 
     async def think(self, message: str, **kwargs) -> AsyncIterator[str]:
-        """思考 - 调用LLM"""
+        """思考 - 调用LLM
+
+        🔧 FIX: 包含对话历史，确保追问场景下模型能获取上下文
+        """
         if not self.llm_client:
             yield "No LLM client configured"
             return
 
         llm_caller = self.get_llm_caller()
         if llm_caller:
-            content = await llm_caller.call(message)
+            # 构建包含历史的消息列表
+            history = self._build_history_for_llm()
+            system_prompt = f"You are {self.info.role}. {self.info.description}"
+
+            content = await llm_caller.call(
+                message=message,
+                system_prompt=system_prompt,
+                history=history,
+            )
             if content:
                 yield content
             else:
                 yield "LLM returned empty response"
         else:
             yield "Failed to create LLM caller"
+
+    def _build_history_for_llm(self) -> List[Dict[str, str]]:
+        """构建供 LLM 调用使用的对话历史
+
+        将 self._messages 转换为 LLMCaller 可接受的格式
+        """
+        history = []
+        for msg in self._messages:
+            # 跳过 tool 消息（它们应该和 assistant 消息配对）
+            if msg.role == "tool":
+                continue
+            history.append(
+                {
+                    "role": msg.role,
+                    "content": msg.content,
+                }
+            )
+        return history
 
     async def decide(self, context: Dict[str, Any], **kwargs) -> Decision:
         """决策 - 解析LLM输出"""
@@ -1069,9 +1385,19 @@ class ProductionAgent(AgentBase):
             else:
                 result = str(tool)
 
+            # Preserve metadata from ToolResult (e.g. ask_user, terminate, request_id)
+            result_metadata = {}
+            if hasattr(result, "metadata") and isinstance(result.metadata, dict):
+                result_metadata = result.metadata
+            result_output = result.output if hasattr(result, "output") else str(result)
+            result_error = result.error if hasattr(result, "error") else None
+            result_success = result.success if hasattr(result, "success") else True
+
             return ActionResult(
-                success=True,
-                output=str(result),
+                success=result_success,
+                output=str(result_output),
+                error=result_error,
+                metadata=result_metadata,
             )
         except Exception as e:
             return ActionResult(
@@ -1119,8 +1445,9 @@ class ProductionAgent(AgentBase):
             else:
                 messages.append(SystemMessage(content=msg.content))
 
-        if self.tools.list_tools():
-            tools_desc = "Available tools: " + ", ".join(self.tools.list_tools())
+        if self.tools.list_all():
+            tool_names = [t.metadata.name for t in self.tools.list_all()]
+            tools_desc = "Available tools: " + ", ".join(tool_names)
             messages.append(SystemMessage(content=tools_desc))
 
         return messages

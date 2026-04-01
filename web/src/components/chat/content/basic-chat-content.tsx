@@ -39,20 +39,19 @@ const BasicChatContent: React.FC<BasicChatContentProps> = ({ ctrl }) => {
   const isProcessing = replyLoading || (history.length > 0 && history[history.length - 1]?.thinking);
 
   return (
-    <div className="flex flex-col h-full bg-[#FAFAFA] dark:bg-[#111]">
+    <div className="flex flex-col h-full bg-[#FAFAFA] dark:bg-[#111] overflow-hidden">
       {/* 标题栏 */}
       <ChatHeader isProcessing={isProcessing} />
       
-      {/* 消息列表区域 */}
       <div 
         ref={scrollableRef}
-        className="flex-1 overflow-y-auto"
+        className="flex-1 overflow-y-auto min-h-0"
       >
         {hasMessages && (
-          <div className="w-full px-4 sm:px-6 lg:px-8 py-6">
-            <div className="max-w-3xl mx-auto">
+          <div className="w-full px-3 py-4">
+            <div className="w-full">
               {showMessages.map((content, index) => (
-                <div key={index} className="mb-6">
+                <div key={index} className="mb-4">
                   <ChatContent
                     content={content}
                     onLinkClick={() => {
@@ -63,16 +62,14 @@ const BasicChatContent: React.FC<BasicChatContentProps> = ({ ctrl }) => {
                   />
                 </div>
               ))}
-              {/* 底部留白 */}
-              <div className="h-20" />
+              <div className="h-8" />
             </div>
           </div>
         )}
       </div>
 
-      {/* 输入框区域 - 居中且限制宽度 */}
-      <div className="flex-shrink-0 pb-6 pt-2 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-3xl mx-auto">
+      <div className="flex-shrink-0 pt-2 pb-2 px-3">
+        <div className="w-full">
           <UnifiedChatInput ctrl={ctrl} showFloatingActions={hasMessages} />
         </div>
       </div>

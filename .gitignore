@@ -191,8 +191,11 @@ thirdparty
 configs/my
 configs/local
 .specstory
+.deriskdb
 
 .cursorignore
+.cursor
+.derisk
 /pilot/datasets/
 /.claude/
 /pilot/dataset/

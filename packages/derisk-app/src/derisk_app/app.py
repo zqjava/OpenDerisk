@@ -7,6 +7,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.staticfiles import StaticFiles
 
+
+class WebSocketAwareStaticFiles(StaticFiles):
+    """StaticFiles that gracefully handles WebSocket connections."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            # WebSocket connections should not reach static files
+            # Let them fall through to 404 or other handlers
+            await send({"type": "websocket.close", "code": 1000})
+            return
+        await super().__call__(scope, receive, send)
+
+
 from derisk._version import version
 from derisk.component import SystemApp
 from derisk.configs.model_config import (
@@ -21,7 +34,12 @@ from derisk_app.base import (
     _migration_db_storage,
     server_init,
 )
-from derisk_app.config import ApplicationConfig, SystemParameters
+from derisk_app.config import (
+    ApplicationConfig,
+    ServiceConfig,
+    ServiceWebParameters,
+    SystemParameters,
+)
 from derisk_serve.core import add_exception_handler
 
 ROOT_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -46,29 +64,88 @@ def scan_configs():
 
 def load_config(config_file: str = None) -> ApplicationConfig:
     from derisk.configs.model_config import ROOT_PATH as DERISK_ROOT_PATH
+    from derisk_ext.datasource.rdbms.conn_sqlite import SQLiteConnectorParameters
+    from derisk.model.parameter import (
+        ModelWorkerParameters,
+        ModelServiceConfig,
+    )
+    from derisk.storage.cache.manager import ModelCacheParameters
+    from derisk.util.tracer import TracerParameters
+    from derisk.util.logger import LoggingParameters
+
+    # 支持环境变量覆盖配置文件
+    env_config = os.environ.get("DERISK_CONFIG_FILE")
+    if env_config and not config_file:
+        config_file = env_config
 
     if config_file is None:
-        config_file = os.path.join(
-            DERISK_ROOT_PATH, "configs", "derisk-proxy-aliyun.toml"
-        )
+        config_file = os.path.join(DERISK_ROOT_PATH, "configs", "derisk-minimal.toml")
     elif not os.path.isabs(config_file):
-        # If config_file is a relative path, make it relative to DERISK_ROOT_PATH
         config_file = os.path.join(DERISK_ROOT_PATH, config_file)
 
-    if not os.path.exists(config_file):
-        raise FileNotFoundError(f"Configuration file not found: {config_file}")
     from derisk.util.configure import ConfigurationManager
+
+    if not os.path.exists(config_file):
+        logger.info(
+            f"Starting with zero configuration (no TOML file needed). "
+            f"Configure models and settings through the web UI at http://localhost:7777"
+        )
+
+        # 支持环境变量覆盖端口和主机
+        env_port = os.environ.get("DERISK_WEB_PORT")
+        env_host = os.environ.get("DERISK_WEB_HOST")
+
+        sys_config = SystemParameters()
+        set_default_language(sys_config.language)
+        scan_configs()
+
+        app_config = ApplicationConfig(
+            system=SystemParameters(),
+            service=ServiceConfig(
+                web=ServiceWebParameters(
+                    host=env_host or "0.0.0.0",
+                    port=int(env_port) if env_port else 7777,
+                    database=SQLiteConnectorParameters(
+                        path="pilot/meta_data/derisk.db",
+                        check_same_thread=False,
+                    ),
+                    model_storage="database",
+                    model_cache=ModelCacheParameters(
+                        enable_model_cache=True,
+                        storage_type="memory",
+                        max_memory_mb=256,
+                    ),
+                ),
+                model=ModelServiceConfig(
+                    worker=ModelWorkerParameters(host="127.0.0.1", port=8001),
+                ),
+            ),
+            trace=TracerParameters(),
+            log=LoggingParameters(),
+        )
+
+        logger.info(
+            f"Service ready. Open http://localhost:{app_config.service.web.port} to configure."
+        )
+        return app_config
 
     logger.info(f"Loading configuration from: {config_file}")
     cfg = ConfigurationManager.from_file(config_file)
     sys_config = cfg.parse_config(SystemParameters, prefix="system")
-    # Must set default language before any i18n usage
     set_default_language(sys_config.language)
 
-    # Scan all configs
     scan_configs()
 
     app_config = cfg.parse_config(ApplicationConfig, hook_section="hooks")
+
+    # 支持环境变量覆盖端口和主机（即使有配置文件）
+    env_port = os.environ.get("DERISK_WEB_PORT")
+    env_host = os.environ.get("DERISK_WEB_HOST")
+    if env_port:
+        app_config.service.web.port = int(env_port)
+    if env_host:
+        app_config.service.web.host = env_host
+
     return app_config
 
 
@@ -115,6 +192,18 @@ def mount_routers(app: FastAPI, param: Optional[ApplicationConfig] = None):
     app.include_router(create_dashboard_routes(), prefix="/api/v1", tags=["Monitoring"])
     logger.info("[Monitoring] Dashboard API routes registered at /api/v1/monitoring")
 
+    # Streaming Configuration API routes
+    from derisk_serve.streaming.api import router as streaming_config_router
+
+    app.include_router(streaming_config_router, tags=["Streaming Config"])
+    logger.info("[Streaming] Config API routes registered at /api/v1/streaming-config")
+
+    from derisk_app.feature_plugins.bootstrap import (
+        register_enabled_feature_plugin_routers,
+    )
+
+    register_enabled_feature_plugin_routers(app)
+
 
 def mount_static_files(app: FastAPI, param: ApplicationConfig):
     if param.service.web.new_web_ui:
@@ -125,16 +214,115 @@ def mount_static_files(app: FastAPI, param: ApplicationConfig):
     os.makedirs(STATIC_MESSAGE_IMG_PATH, exist_ok=True)
     app.mount(
         "/images",
-        StaticFiles(directory=STATIC_MESSAGE_IMG_PATH, html=True),
+        WebSocketAwareStaticFiles(directory=STATIC_MESSAGE_IMG_PATH, html=True),
         name="static2",
     )
-    app.mount("/", StaticFiles(directory=static_file_path, html=True), name="static")
+    app.mount(
+        "/",
+        WebSocketAwareStaticFiles(directory=static_file_path, html=True),
+        name="static",
+    )
 
     app.mount(
         "/swagger_static",
-        StaticFiles(directory=static_file_path),
+        WebSocketAwareStaticFiles(directory=static_file_path),
         name="swagger_static",
     )
+
+
+def _sync_oauth2_config_from_db():
+    """Sync OAuth2 config from database to runtime config on startup.
+
+    This ensures that after deployment/restart, the OAuth2 configuration
+    stored in database (which survives redeployment) is loaded into
+    the in-memory config used by the application.
+    """
+    try:
+        from derisk_app.config_storage.oauth2_db_storage import get_oauth2_db_storage
+        from derisk_core.config import ConfigManager, OAuth2Config
+
+        db_storage = get_oauth2_db_storage()
+        # Load with actual secrets for runtime use
+        db_oauth2 = db_storage.load_with_secrets()
+
+        if db_oauth2 is not None:
+            # Update the runtime config with database values
+            cfg = ConfigManager.get()
+            oauth2_config = OAuth2Config(
+                enabled=db_oauth2.get("enabled", False),
+                providers=db_oauth2.get("providers", []),
+                admin_users=db_oauth2.get("admin_users", []),
+            )
+            cfg.oauth2 = oauth2_config
+            logger.info(
+                "OAuth2 config loaded from database (secrets loaded for runtime)"
+            )
+        else:
+            logger.info("No OAuth2 config in database, using file config")
+    except Exception as e:
+        logger.warning(f"Failed to sync OAuth2 from database: {e}")
+
+
+def _sync_app_config_to_system_app():
+    """Sync JSON config (agent_llm, default_model, etc.) to system_app.config on startup.
+
+    This ensures that after restart, the LLM configuration saved in derisk.json
+    is properly loaded into system_app.config and ModelConfigCache, making models
+    available immediately without needing manual refresh.
+    """
+    try:
+        from derisk_core.config import ConfigManager
+        from derisk.agent.util.llm.model_config_cache import (
+            ModelConfigCache,
+            parse_provider_configs,
+        )
+
+        cfg = ConfigManager.get()
+
+        agent_llm_conf = getattr(cfg, "agent_llm", None)
+        if not agent_llm_conf:
+            logger.info("No agent_llm config in derisk.json")
+            return
+
+        from derisk.component import SystemApp
+
+        system_app = SystemApp.get_instance()
+        if not system_app:
+            logger.warning("SystemApp not available, cannot sync app config")
+            return
+
+        from derisk_app.openapi.api_v1.config_api import (
+            _convert_agent_llm_to_system_format,
+        )
+
+        agent_llm_dict = _convert_agent_llm_to_system_format(agent_llm_conf)
+
+        system_app.config.set("agent.llm", agent_llm_dict)
+
+        model_configs = parse_provider_configs(agent_llm_dict)
+        if model_configs:
+            ModelConfigCache.register_configs(model_configs)
+
+        model_count = 0
+        for p in agent_llm_dict.get("provider", []):
+            if isinstance(p, dict):
+                model_count += len(p.get("model", []))
+
+        logger.info(
+            f"App config synced: {len(agent_llm_dict.get('provider', []))} providers, "
+            f"{model_count} models registered to ModelConfigCache"
+        )
+
+        default_model = getattr(cfg, "default_model", None)
+        if default_model:
+            default_model_dict = default_model.model_dump(mode="json")
+            system_app.config.set("agent.default_model", default_model_dict)
+            if default_model.model_id:
+                system_app.config.set("agent.default_llm", default_model.model_id)
+            logger.info(f"Default model synced: {default_model.model_id}")
+
+    except Exception as e:
+        logger.warning(f"Failed to sync app config to system_app: {e}")
 
 
 def initialize_app(param: ApplicationConfig, app: FastAPI, system_app: SystemApp):
@@ -163,6 +351,10 @@ def initialize_app(param: ApplicationConfig, app: FastAPI, system_app: SystemApp
     _migration_db_storage(
         param.service.web.database, web_config.disable_alembic_upgrade
     )
+
+    _sync_oauth2_config_from_db()
+
+    _sync_app_config_to_system_app()
 
     from derisk_app.component_configs import initialize_components
 

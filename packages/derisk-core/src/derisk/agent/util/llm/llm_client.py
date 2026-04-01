@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
 
 from derisk._private.pydantic import BaseModel, model_to_dict
 from derisk.agent.core.llm_config import AgentLLMConfig
@@ -21,6 +22,136 @@ from derisk.util.tracer import root_tracer
 logger = logging.getLogger(__name__)
 
 
+def _normalize_provider_secret_suffix(provider_name: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", (provider_name or "").strip().lower()).strip("_")
+
+
+def _get_custom_provider_secret_name(provider_name: str) -> Optional[str]:
+    normalized = _normalize_provider_secret_suffix(provider_name)
+    if not normalized:
+        return None
+    return f"llm_provider_{normalized}_api_key"
+
+
+def _get_custom_secret_candidates(
+    provider_name: str, base_url: Optional[str] = None
+) -> List[str]:
+    candidates: List[str] = []
+
+    provider_secret = _get_custom_provider_secret_name(provider_name)
+    if provider_secret:
+        candidates.append(provider_secret)
+
+    if base_url:
+        try:
+            hostname = urlparse(base_url).hostname or ""
+            host_parts = [part for part in hostname.split(".") if part]
+            derived_names = []
+            if host_parts:
+                derived_names.append(host_parts[0])
+            if len(host_parts) >= 2:
+                derived_names.append(host_parts[-2])
+            for name in derived_names:
+                secret_name = _get_custom_provider_secret_name(name)
+                if secret_name and secret_name not in candidates:
+                    candidates.append(secret_name)
+        except Exception:
+            pass
+
+    return candidates
+
+
+def _get_api_key_from_secrets(
+    provider_name: str, base_url: Optional[str] = None
+) -> Optional[str]:
+    """从加密存储的 secrets 中获取 API Key
+
+    优先级：
+    1. 先尝试获取特定于 provider 的 key (如 openai_api_key, dashscope_api_key)
+    2. 根据 base_url 判断是否使用特定平台的 key
+    3. 如果没有，尝试通用的 llm_api_key
+
+    Args:
+        provider_name: Provider 名称 (如 openai, alibaba, anthropic)
+        base_url: API base URL，用于判断实际使用的平台
+
+    Returns:
+        API Key 或 None
+    """
+    try:
+        from derisk_core.config.encryption import get_secret
+
+        provider_name_lower = provider_name.lower()
+        custom_provider_secrets = _get_custom_secret_candidates(
+            provider_name_lower, base_url
+        )
+
+        # 首先尝试获取 provider 特定的 key
+        provider_specific_keys = {
+            "openai": ["openai_api_key"],
+            "alibaba": ["dashscope_api_key", "alibaba_api_key"],
+            "anthropic": ["anthropic_api_key", "claude_api_key"],
+            "dashscope": ["dashscope_api_key"],
+            "claude": ["anthropic_api_key", "claude_api_key"],
+        }
+
+        # 根据 base_url 判断实际使用的平台（处理 OpenAI 兼容模式）
+        base_url_lower = base_url.lower() if base_url else ""
+        if "dashscope" in base_url_lower or "aliyun" in base_url_lower:
+            # 阿里云 DashScope 使用 OpenAI 兼容 API，但实际 key 是 dashscope_api_key
+            keys_to_try = ["dashscope_api_key", "alibaba_api_key", "llm_api_key"]
+        elif "anthropic" in base_url_lower or "claude" in base_url_lower:
+            keys_to_try = ["anthropic_api_key", "claude_api_key", "llm_api_key"]
+        elif "openai" in base_url_lower or "openai.com" in base_url_lower:
+            keys_to_try = ["openai_api_key", "llm_api_key"]
+        else:
+            # 使用默认的 provider 映射
+            keys_to_try = provider_specific_keys.get(provider_name_lower, [])
+            if provider_name_lower == "openai":
+                # openai provider 可能是 OpenAI 也可能是其他 OpenAI 兼容服务
+                # 尝试所有可能的 key
+                keys_to_try = [
+                    "openai_api_key",
+                    "dashscope_api_key",
+                    "alibaba_api_key",
+                    "anthropic_api_key",
+                ]
+
+        for secret_name in reversed(custom_provider_secrets):
+            if secret_name not in keys_to_try:
+                keys_to_try.insert(0, secret_name)
+
+        # 最后添加通用的 llm_api_key
+        if "llm_api_key" not in keys_to_try:
+            keys_to_try.append("llm_api_key")
+
+        logger.debug(
+            f"Looking for API key: provider={provider_name}, base_url={base_url}, keys_to_try={keys_to_try}"
+        )
+
+        for key_name in keys_to_try:
+            secret_value = get_secret(key_name)
+            if secret_value:
+                # 记录找到的 key（只显示部分信息）
+                key_preview = (
+                    f"{secret_value[:8]}...{secret_value[-4:]}"
+                    if len(secret_value) > 12
+                    else "***"
+                )
+                logger.info(
+                    f"Found API key from secrets: key_name={key_name}, provider={provider_name}, preview={key_preview}, length={len(secret_value)}"
+                )
+                return secret_value
+
+        logger.debug(f"No API key found in secrets for provider={provider_name}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to get API key from secrets: {e}")
+        return None
+
+
 class AgentLLMOut(BaseModel):
     llm_name: Optional[str] = None
     llm_context: Optional[dict] = None
@@ -28,6 +159,7 @@ class AgentLLMOut(BaseModel):
     thinking_content: Optional[str] = None
     content: Optional[str] = None
     tool_calls: Optional[Union[str, List[Dict[str, Any]]]] = None
+    input_tools: Optional[List[Dict[str, Any]]] = None
     metrics: Optional[ModelInferenceMetrics] = None
     extra: Optional[Dict[str, Any]] = None
     ttft: int = 0
@@ -89,7 +221,44 @@ class AIWrapper:
         api_key = self._llm_config.api_key
         base_url = self._llm_config.base_url
 
+        # 检查 api_key 是否是占位符（未解析的配置引用或默认值）
+        def _is_placeholder_key(key: Optional[str]) -> bool:
+            if not key:
+                return True
+            # 检查是否是 ${env:xxx} 或 ${secrets.xxx} 格式
+            if key.startswith("${"):
+                return True
+            # 检查是否是常见的占位符值
+            placeholder_patterns = [
+                "sk-...",
+                "sk-xxxx",
+                "your_api_key",
+                "xxx",
+                "placeholder",
+            ]
+            key_lower = key.lower()
+            if any(pattern in key_lower for pattern in placeholder_patterns):
+                return True
+            return False
+
+        is_placeholder = _is_placeholder_key(api_key)
+        if is_placeholder and api_key:
+            logger.debug(
+                f"API key appears to be a placeholder: {api_key[:20]}..., will try to get from secrets"
+            )
+
+        # 优先级：系统设置(secrets) > 配置文件 > 环境变量
+        if not api_key or is_placeholder:
+            # 1. 首先尝试从加密存储的 secrets 中获取
+            secrets_key = _get_api_key_from_secrets(provider_name, base_url)
+            if secrets_key:
+                api_key = secrets_key
+                logger.info(
+                    f"Using API key from system secrets for provider={provider_name}"
+                )
+
         if not api_key:
+            # 2. 然后尝试从环境变量获取
             env_key = ProviderRegistry.get_env_key(provider_name)
             if env_key:
                 api_key = os.getenv(env_key)
@@ -111,7 +280,7 @@ class AIWrapper:
             model=self._llm_config.model,
             **kwargs,
         )
-        
+
         if provider:
             self._provider = provider
         else:
@@ -165,6 +334,20 @@ class AIWrapper:
         # Ensure llm_model is a string
         final_llm_model: str = str(llm_model) if llm_model else "default"
 
+        # If the model doesn't exist in cache, fallback to default model
+        if llm_model and not ModelConfigCache.has_model(llm_model):
+            all_models = ModelConfigCache.get_all_models()
+            if all_models:
+                fallback_model = all_models[0]
+                logger.warning(
+                    f"Model '{llm_model}' not found in config, falling back to '{fallback_model}'"
+                )
+                llm_model = fallback_model
+            else:
+                logger.warning(
+                    f"Model '{llm_model}' not found in config and no fallback available"
+                )
+
         if llm_model and ModelConfigCache.has_model(llm_model):
             model_config_dict = ModelConfigCache.get_config(llm_model)
             if model_config_dict:
@@ -172,8 +355,43 @@ class AIWrapper:
                     try:
                         temp_llm_config = AgentLLMConfig.from_dict(model_config_dict)
                         provider_name = temp_llm_config.provider.lower()
-                        api_key = temp_llm_config.api_key
+
                         base_url = temp_llm_config.base_url
+
+                        # 检查 api_key 是否是占位符
+                        def _is_placeholder_key(key: Optional[str]) -> bool:
+                            if not key:
+                                return True
+                            if key.startswith("${"):
+                                return True
+                            placeholder_patterns = [
+                                "sk-...",
+                                "sk-xxxx",
+                                "your_api_key",
+                                "xxx",
+                                "placeholder",
+                            ]
+                            key_lower = key.lower()
+                            if any(
+                                pattern in key_lower for pattern in placeholder_patterns
+                            ):
+                                return True
+                            return False
+
+                        api_key = temp_llm_config.api_key
+                        is_placeholder = _is_placeholder_key(api_key)
+
+                        # 优先级：系统设置(secrets) > 配置文件 > 环境变量
+                        if not api_key or is_placeholder:
+                            api_key = _get_api_key_from_secrets(provider_name, base_url)
+                            if api_key:
+                                logger.info(
+                                    f"Using API key from system secrets for model={llm_model}, provider={provider_name}"
+                                )
+                        if not api_key:
+                            env_key = ProviderRegistry.get_env_key(provider_name)
+                            if env_key:
+                                api_key = os.getenv(env_key)
 
                         provider = ProviderRegistry.create_provider(
                             name=provider_name,
@@ -183,7 +401,9 @@ class AIWrapper:
                         )
                         if provider:
                             self._provider_cache[llm_model] = provider
-                            logger.info(f"Created {provider_name} provider for model={llm_model}")
+                            logger.info(
+                                f"Created {provider_name} provider for model={llm_model}"
+                            )
                     except Exception as e:
                         logger.error(
                             f"Failed to create provider for model {llm_model}: {e}"
@@ -250,13 +470,37 @@ class AIWrapper:
         if request.messages:
             messages_summary = []
             for msg in request.messages:
-                content = msg.content if hasattr(msg, "content") else str(msg)
+                if isinstance(msg, dict):
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                else:
+                    role = getattr(msg, "role", "unknown")
+                    content = getattr(msg, "content", str(msg))
+
                 if isinstance(content, list):
-                    content_str = (
-                        "["
-                        + ", ".join([f"{c.get('type', 'unknown')}" for c in content])
-                        + "]"
-                    )
+                    text_parts = []
+                    for c in content:
+                        if isinstance(c, dict):
+                            if c.get("type") == "text" and "text" in c:
+                                text_parts.append(c["text"])
+                        else:
+                            c_type = getattr(c, "type", None)
+                            if c_type == "text":
+                                obj = getattr(c, "object", None)
+                                if obj:
+                                    text_parts.append(str(getattr(obj, "data", "")))
+                    if text_parts:
+                        content_str = " ".join(text_parts)
+                        if len(content_str) > 500:
+                            content_str = content_str[:500] + "..."
+                    else:
+                        type_list = []
+                        for c in content:
+                            if isinstance(c, dict):
+                                type_list.append(c.get("type", "unknown"))
+                            else:
+                                type_list.append(getattr(c, "type", "unknown"))
+                        content_str = "[" + ", ".join(type_list) + "]"
                 else:
                     content_str = (
                         str(content)[:500] + "..."
@@ -265,7 +509,7 @@ class AIWrapper:
                     )
                 messages_summary.append(
                     {
-                        "role": msg.role if hasattr(msg, "role") else "unknown",
+                        "role": role,
                         "content": content_str,
                     }
                 )
@@ -328,6 +572,9 @@ class AIWrapper:
             )
         else:
             logger.warning("No function_calling_context provided to LLM call!")
+            tools = None
+
+        input_tools_list = tools if tools else None
 
         try:
             # Choose client: self._provider or self._llm_client (legacy)
@@ -398,6 +645,7 @@ class AIWrapper:
                         llm_name=llm_model,
                         llm_context=llm_context,
                         tool_calls=model_output.tool_calls,
+                        input_tools=input_tools_list,
                         in_messages=params["messages"],
                     )
             else:
@@ -435,6 +683,7 @@ class AIWrapper:
                     llm_name=llm_model,
                     llm_context=llm_context,
                     tool_calls=model_output.tool_calls,
+                    input_tools=input_tools_list,
                     in_messages=params["messages"],
                 )
         except LLMChatError as e:

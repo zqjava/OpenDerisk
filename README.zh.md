@@ -69,8 +69,13 @@ curl -fsSL https://raw.githubusercontent.com/derisk-ai/OpenDerisk/main/install.s
 ```
 
 #### 配置文件
-安装完成后，需要配置系统。创建配置文件：
-编辑 `~/.openderisk/derisk-proxy-aliyun.toml` 并设置您的 API 密钥。
+安装完成后，默认配置文件已自动初始化到：
+`~/.openderisk/configs/derisk-proxy-aliyun.toml`
+
+编辑该文件并设置您的 API 密钥：
+```shell
+vi ~/.openderisk/configs/derisk-proxy-aliyun.toml
+```
 
 #### 启动
 ```
@@ -107,10 +112,34 @@ uv sync --all-packages --frozen \
     --extra "derisks" \
     --extra "storage_oss2" \
     --extra "client" \
-    --extra "ext_base"
+    --extra "ext_base" \
+    --extra "channel_dingtalk"
 ```
 
+> 注意：`channel_dingtalk` 为可选依赖，若不需要钉钉渠道支持可移除此行。
+
 #### 启动服务
+
+**🚀 快速启动（零配置，推荐）**
+
+无需任何配置文件，直接启动：
+
+```bash
+# 方式一：使用快速启动命令
+uv run derisk quickstart
+
+# 方式二：使用启动脚本
+./start.sh
+
+# 方式三：指定端口
+uv run derisk quickstart -p 8888
+```
+
+启动后访问 http://localhost:7777，通过 Web UI 配置模型和其他设置。
+
+详细说明请查看: [快速启动指南](QUICKSTART.md)
+
+**📝 使用配置文件启动**
 
 在 `derisk-proxy-aliyun.toml` 中配置 API_KEY，然后运行：
 
@@ -121,6 +150,10 @@ uv sync --all-packages --frozen \
 
 运行启动命令：
 ```bash
+# 使用配置文件启动
+uv run derisk quickstart -c configs/derisk-proxy-aliyun.toml
+
+# 或使用传统方式
 uv run python packages/derisk-app/src/derisk_app/derisk_server.py --config configs/derisk-proxy-aliyun.toml
 ```
 

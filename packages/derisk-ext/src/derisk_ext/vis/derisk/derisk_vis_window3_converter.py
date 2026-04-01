@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from enum import Enum
-from typing import List, Optional, Dict, Union, Tuple
+from typing import List, Optional, Dict, Union, Tuple, Any
 
 from derisk.agent import ActionOutput, ConversableAgent, BlankAction
 from derisk.agent.core.action.report_action import ReportAction
@@ -39,6 +39,10 @@ from derisk_ext.vis.common.tags.derisk_work_space import (
     WorkSpaceContent,
     WorkSpace,
     FolderNode,
+)
+from derisk_ext.vis.common.tags.derisk_system_events import (
+    SystemEvents,
+    SystemEventsContent,
 )
 from .derisk_vis_incr_converter import DeriskVisIncrConverter
 from derisk_ext.vis.derisk.derisk_vis_converter import DrskVisTagPackage
@@ -191,6 +195,10 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
                 running_agents.append(v.name)
 
         task_manager: TreeManager = kwargs.get("task_manager")
+        event_manager = kwargs.get("event_manager")
+        conv_id = kwargs.get("conv_id") or kwargs.get("cache")
+        if conv_id and hasattr(conv_id, "conv_id"):
+            conv_id = conv_id.conv_id
         try:
             planning_vis = ""
             ## 规划空间更新
@@ -206,6 +214,9 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
                     main_agent_name=main_agent_name,
                     actions_map=kwargs.get("actions_map"),
                     task_manager=task_manager,
+                    event_manager=None,
+                    running_agents=running_agents,
+                    conv_id=conv_id,
                 )
 
             ## 工作空间增量更新
@@ -219,14 +230,67 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
                     senders_map=senders_map,
                     main_agent_name=main_agent_name,
                     running_agents=running_agents,
+                    cache=kwargs.get("cache"),
                 )
 
             planning_window = planning_vis
             if gpt_msg:
-                foot_vis = await self._footer_vis_build(gpt_msg)
+                foot_vis = await self._footer_vis_build(gpt_msg, senders_map)
                 if foot_vis:
-                    planning_window = planning_window + "\n" + foot_vis
-            if planning_vis or work_vis:
+                    if planning_window:
+                        planning_window = planning_window + "\n" + foot_vis
+                    else:
+                        planning_window = foot_vis
+
+            system_events_vis = ""
+            if event_manager:
+                if not conv_id:
+                    if (
+                        main_agent_name
+                        and senders_map
+                        and main_agent_name in senders_map
+                    ):
+                        main_agent = senders_map[main_agent_name]
+                        if (
+                            hasattr(main_agent, "agent_context")
+                            and main_agent.agent_context
+                        ):
+                            conv_id = main_agent.agent_context.conv_id
+                    elif messages:
+                        conv_id = messages[0].conv_id if messages else None
+
+                if not conv_id and event_manager:
+                    conv_id = event_manager.conv_id
+
+                if conv_id:
+                    if not planning_window:
+                        planning_window = self._create_placeholder_planning_space(
+                            conv_id
+                        )
+
+                    all_events = event_manager.get_all_events()
+                    has_completion_event = any(
+                        e.event_type.value in ["agent_complete", "error_occurred"]
+                        for e in all_events
+                    )
+                    has_events = len(all_events) > 0
+                    is_actually_running = (
+                        bool(running_agents)
+                        or (has_events and not has_completion_event)
+                    ) and not has_completion_event
+                    system_events_vis = await self._system_events_vis_build(
+                        conv_id=conv_id,
+                        event_manager=event_manager,
+                        is_running=is_actually_running,
+                    )
+
+            if system_events_vis:
+                if planning_window:
+                    planning_window = planning_window + "\n" + system_events_vis
+                else:
+                    planning_window = system_events_vis
+
+            if planning_window or work_vis:
                 return json.dumps(
                     {"planning_window": planning_window, "running_window": work_vis},
                     ensure_ascii=False,
@@ -234,7 +298,7 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
             else:
                 return None
         except Exception as e:
-            logger.exception("vis_window2异常!")
+            logger.exception("vis_window3异常!")
             return None
 
     async def _gen_plan_items(
@@ -580,32 +644,41 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
                 result_vis_list.extend(children_vis_list)
         return result_vis_list
 
-    async def _footer_vis_build(self, gpt_msg: GptsMessage):
+    async def _footer_vis_build(
+        self,
+        gpt_msg: GptsMessage,
+        senders_map: Optional[Dict[str, "ConversableAgent"]] = None,
+        is_retry_chat: bool = False,
+    ):
         plans_vis = []
         foot_vis = None
         confirm_vis = None
-        # 任务更新(属于规划任务的消息都需要更新规划)
+        ask_user_vis = None
+
         if gpt_msg:
             if gpt_msg.action_report:
-                confirm_vis = await self._render_confirm_action(
+                if not is_retry_chat:
+                    ask_user_vis = await self.gen_ask_user_vis(gpt_msg)
+
+                confirm_vis = await self._render_tool_confirm_action(
                     gpt_msg.message_id, gpt_msg.action_report
                 )
 
             if gpt_msg.receiver == HUMAN_ROLE:
-                foot_vis = ""
+                foot_vis_parts = []
 
                 notice_view = await self.gen_one_final_notice_vis(gpt_msg)
                 if notice_view:
-                    foot_vis = foot_vis + "\n" + notice_view
+                    foot_vis_parts.append(notice_view)
 
-                final_conclusion_vis = await self._render_final_conclusion(gpt_msg)
-                if final_conclusion_vis:
-                    foot_vis = foot_vis + "\n" + final_conclusion_vis
-        ## 规划空间的footer信息
+                if foot_vis_parts:
+                    foot_vis = "\n".join(foot_vis_parts)
         if foot_vis:
             plans_vis.append(foot_vis)
 
-        if confirm_vis:
+        if ask_user_vis:
+            plans_vis.append(ask_user_vis)
+        elif confirm_vis:
             plans_vis.append(confirm_vis)
 
         return "\n".join(plans_vis)
@@ -674,18 +747,39 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         actions_map: Optional[Dict[str, "ActionOutput"]] = None,
         senders_map: Optional[Dict[str, "ConversableAgent"]] = None,
         task_manager: Optional[TreeManager] = None,
+        event_manager: Optional[Any] = None,
+        running_agents: Optional[List[str]] = None,
+        conv_id: Optional[str] = None,
     ) -> Optional[str]:
         """构建规划空间可视化数据。
 
         优化：只发送变更的叶子节点，前端根据 uid 自动合并。
         不再递归构建完整树结构，大幅降低数据传输量。
         """
-        if main_agent_name not in senders_map:
-            logger.warning(
-                f"main_agent_name '{main_agent_name}' not found in senders_map：{senders_map}"
-            )
-        main_agent = senders_map[main_agent_name]
-        conv_id: str = main_agent.agent_context.conv_id
+        main_agent = None
+        if senders_map and main_agent_name:
+            if main_agent_name not in senders_map:
+                logger.debug(
+                    f"main_agent_name '{main_agent_name}' not found in senders_map"
+                )
+            main_agent = senders_map.get(main_agent_name)
+
+        if not conv_id:
+            if (
+                main_agent
+                and hasattr(main_agent, "agent_context")
+                and main_agent.agent_context
+            ):
+                conv_id = main_agent.agent_context.conv_id
+            elif messages:
+                conv_id = messages[0].conv_id if messages else None
+
+        if not conv_id and event_manager:
+            conv_id = event_manager.conv_id
+
+        if not conv_id:
+            logger.warning("_planning_vis_build error: unable to determine conv_id")
+            return None
 
         task_items_vis = []
 
@@ -996,7 +1090,7 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
             from derisk.agent.core.memory.gpts import GptsMemory
             from derisk.agent.core.memory.gpts.file_base import FileType
 
-            memory = main_agent.agent_context.memory
+            memory = main_agent.memory
             if not memory or not hasattr(memory, "gpts_memory"):
                 return file_system_folder
 
@@ -1067,6 +1161,85 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
             logger.warning(f"Failed to build file system folder: {e}")
             return file_system_folder
 
+    async def _build_incremental_file_nodes(
+        self,
+        main_agent: Optional["ConversableAgent"],
+        cache: Optional[Any] = None,
+    ) -> List[FolderNode]:
+        conv_id = main_agent.agent_context.conv_id
+        conv_session_id = main_agent.agent_context.conv_session_id
+
+        incremental_nodes: List[FolderNode] = []
+
+        try:
+            from derisk.agent.core.memory.gpts import GptsMemory
+            from derisk.agent.core.memory.gpts.file_base import FileType
+
+            memory = main_agent.memory
+            if not memory or not hasattr(memory, "gpts_memory"):
+                return incremental_nodes
+
+            gpts_memory = memory.gpts_memory
+            if not isinstance(gpts_memory, GptsMemory):
+                return incremental_nodes
+
+            files = await gpts_memory.list_files(conv_id)
+            if not files:
+                return incremental_nodes
+
+            rendered_file_ids = cache.rendered_file_ids if cache else set()
+
+            type_display_names = {
+                FileType.CONCLUSION.value: "📋 结论文件",
+                FileType.TOOL_OUTPUT.value: "🔧 工具输出",
+                FileType.WRITE_FILE.value: "📝 写入文件",
+                FileType.DELIVERABLE.value: "📦 交付物",
+                FileType.TRUNCATED_OUTPUT.value: "📄 截断输出",
+                FileType.KANBAN.value: "📊 看板文件",
+                FileType.WORK_LOG.value: "📆 工作日志",
+                FileType.TODO.value: "✅ 任务列表",
+                "other": "📁 其他文件",
+            }
+
+            for file_meta in files:
+                if file_meta.file_id in rendered_file_ids:
+                    continue
+
+                file_type = file_meta.file_type or "other"
+                type_folder_uid = f"{conv_session_id}_fs_{file_type}"
+                file_node_uid = f"{conv_session_id}_file_{file_meta.file_id}"
+
+                file_node = FolderNode(
+                    uid=file_node_uid,
+                    type=UpdateType.INCR.value,
+                    item_type="file",
+                    path=type_folder_uid,
+                    title=file_meta.file_name,
+                    description=f"{file_meta.file_size} bytes"
+                    if file_meta.file_size
+                    else None,
+                    status=file_meta.status,
+                    task_type="afs_file",
+                    file_id=file_meta.file_id,
+                    file_name=file_meta.file_name,
+                    file_type=file_meta.file_type,
+                    file_size=file_meta.file_size,
+                    preview_url=file_meta.preview_url,
+                    download_url=file_meta.download_url,
+                    oss_url=file_meta.oss_url,
+                    mime_type=file_meta.mime_type,
+                )
+                incremental_nodes.append(file_node)
+
+                if cache:
+                    cache.rendered_file_ids.add(file_meta.file_id)
+
+            return incremental_nodes
+
+        except Exception as e:
+            logger.warning(f"Failed to build incremental file nodes: {e}")
+            return incremental_nodes
+
     async def _running_vis_build(
         self,
         gpt_msg: Optional[GptsMessage] = None,
@@ -1076,13 +1249,10 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         senders_map: Optional[Dict[str, "ConversableAgent"]] = None,
         main_agent_name: Optional[str] = None,
         running_agents: Optional[List[str]] = None,
+        cache: Optional[Any] = None,
     ):
         main_agent = senders_map[main_agent_name]
         conv_session_id = main_agent.agent_context.conv_session_id
-        # 不要因为有 gpt_msg 但没有 action_report 就返回 None
-        # LLM 流式输出可能没有 action_report，但仍然需要显示内容
-        # if gpt_msg and not gpt_msg.action_report and not is_first_push:
-        #     return None
 
         work_items = await self.gen_work_item(
             gpt_msg=gpt_msg,
@@ -1092,9 +1262,14 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         )
         main_agent_folder = None
         file_system_folder = None
+        incremental_file_items: List[FolderNode] = []
+
+        # 🔧 修复：每次都构建 agent folder，确保 explorer 始终存在
+        # 这样追问时也能正确更新 AgentFolder 数据
+        main_agent_folder = await self._build_agent_folder(main_agent=main_agent)
+
         if is_first_push:
             logger.info("构建vis_window3空间，进行首次资源管理器刷新!")
-            main_agent_folder = await self._build_agent_folder(main_agent=main_agent)
             file_system_folder = await self._build_file_system_folder(
                 main_agent=main_agent
             )
@@ -1103,8 +1278,21 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
                     main_agent_folder.items = []
                 main_agent_folder.items.append(file_system_folder)
 
+            if cache and file_system_folder:
+                for type_folder in file_system_folder.items or []:
+                    for file_node in type_folder.items or []:
+                        if hasattr(file_node, "file_id") and file_node.file_id:
+                            cache.rendered_file_ids.add(file_node.file_id)
+        else:
+            incremental_file_items = await self._build_incremental_file_nodes(
+                main_agent=main_agent,
+                cache=cache,
+            )
+
         work_space_content = None
-        if work_items and main_agent_folder:
+        all_items = (work_items or []) + incremental_file_items
+
+        if all_items and main_agent_folder:
             work_space_content = WorkSpaceContent(
                 uid=conv_session_id,
                 type=UpdateType.INCR.value,
@@ -1112,11 +1300,11 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
                 explorer=self.vis_inst(AgentFolder.vis_tag()).sync_display(
                     content=main_agent_folder.to_dict()
                 ),
-                items=work_items,
+                items=all_items,
             )
-        elif work_items:
+        elif all_items:
             work_space_content = WorkSpaceContent(
-                uid=conv_session_id, type=UpdateType.INCR.value, items=work_items
+                uid=conv_session_id, type=UpdateType.INCR.value, items=all_items
             )
         elif main_agent_folder:
             work_space_content = WorkSpaceContent(
@@ -1582,28 +1770,26 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         messages: List["GptsMessage"],
         senders_map: Optional[Dict[str, "ConversableAgent"]] = None,
     ) -> Optional[str]:
-        """渲染terminate时交付的文件列表.
+        """渲染交付的文件列表.
 
-        从messages中查找terminate action，并提取其中的文件信息，
+        从messages中查找包含output_files的action，并提取其中的文件信息，
         使用d-attach-list组件渲染文件列表。
 
         Returns:
             d-attach-list组件的vis字符串，如果没有文件则返回None
         """
-        from derisk.agent.expand.actions.terminate_action import Terminate
-
         file_contents = []
 
         for msg in messages:
             if not msg.action_report:
                 continue
             for action_out in msg.action_report:
-                # 检查是否是terminate action
-                if action_out.name != Terminate.name:
-                    continue
-
                 # 从output_files获取文件信息
-                output_files = action_out.output_files or []
+                # 兼容两种情况：ActionOutput对象 或 字典（从数据库读取时）
+                if isinstance(action_out, dict):
+                    output_files = action_out.get("output_files") or []
+                else:
+                    output_files = getattr(action_out, "output_files", None) or []
                 if not output_files:
                     continue
 
@@ -1775,3 +1961,310 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
             ensure_ascii=False,
         )
         return all_vis
+
+    async def _system_events_vis_build(
+        self,
+        conv_id: str,
+        event_manager: Optional["SystemEventManager"],
+        is_running: bool = True,
+    ) -> Optional[str]:
+        """Build system events visualization for planning window.
+
+        This method generates a d-system-events vis component that displays
+        real-time agent lifecycle events including preparation phase
+        (build, resource loading, sandbox init) and execution phase
+        (LLM calls, actions, retries, errors).
+
+        Args:
+            conv_id: Conversation ID
+            event_manager: SystemEventManager instance containing events
+            is_running: Whether the agent is currently running
+
+        Returns:
+            Vis string for the system events component, or None if no events
+        """
+        if not event_manager:
+            return None
+
+        all_events = event_manager.get_all_events()
+
+        if not all_events and not is_running:
+            return None
+
+        current_phase = event_manager.get_current_phase().value
+
+        current_action = self._get_current_action(
+            all_events[:5] if all_events else [], is_running
+        )
+
+        merged_events = self._merge_events(all_events)
+
+        events_data = []
+        for event in merged_events:
+            events_data.append(
+                {
+                    "event_id": event["event_id"],
+                    "event_type": event["event_type"],
+                    "title": event["title"],
+                    "description": event.get("description"),
+                    "timestamp": event.get("timestamp"),
+                    "duration_ms": event.get("duration_ms"),
+                    "status": event.get("status", "done"),
+                }
+            )
+
+        content = {
+            "uid": f"{conv_id}_system_events",
+            "type": UpdateType.INCR.value,
+            "is_running": is_running,
+            "current_action": current_action,
+            "current_phase": current_phase,
+            "recent_events": events_data,
+            "total_count": len(merged_events),
+            "has_more": False,
+            "total_duration_ms": event_manager.get_total_duration_ms(),
+        }
+
+        return self.vis_inst(SystemEvents.vis_tag()).sync_display(content=content)
+
+    def _merge_events(self, events: List) -> List[Dict]:
+        """Merge start/end event pairs into single events with duration.
+
+        Args:
+            events: List of SystemEvent objects
+
+        Returns:
+            List of merged event dictionaries
+        """
+        if not events:
+            return []
+
+        skip_events = {
+            "llm_complete",
+            "llm_failed",
+            "action_complete",
+            "action_failed",
+            "agent_build_complete",
+            "sandbox_create_done",
+            "sandbox_create_failed",
+            "sandbox_init_done",
+            "sandbox_init_failed",
+            "resource_build_done",
+            "resource_build_failed",
+            "resource_loaded",
+            "resource_failed",
+            "sub_agent_build_done",
+            "sub_agent_build_failed",
+            "agent_complete",
+        }
+
+        event_pairs = {
+            "llm_thinking": ["llm_complete", "llm_failed"],
+            "action_start": ["action_complete", "action_failed"],
+            "agent_build_start": ["agent_build_complete"],
+            "sandbox_create_start": ["sandbox_create_done", "sandbox_create_failed"],
+            "sandbox_init_start": ["sandbox_init_done", "sandbox_init_failed"],
+            "resource_build_start": ["resource_build_done", "resource_build_failed"],
+            "resource_loading": ["resource_loaded", "resource_failed"],
+            "sub_agent_build_start": ["sub_agent_build_done", "sub_agent_build_failed"],
+            "agent_start": ["agent_complete"],
+        }
+
+        merged = []
+
+        for event in events:
+            event_type = event.event_type.value
+
+            if event_type in skip_events:
+                continue
+
+            title = self._build_event_title(event)
+
+            if event_type in event_pairs:
+                end_types = event_pairs[event_type]
+
+                duration_ms = event.duration_ms
+                status = "running"
+
+                for e in events:
+                    if e.event_type.value in end_types:
+                        if e.duration_ms is not None:
+                            duration_ms = e.duration_ms
+                        status = "failed" if "failed" in e.event_type.value else "done"
+                        break
+
+                merged.append(
+                    {
+                        "event_id": event.event_id,
+                        "event_type": event_type,
+                        "title": title,
+                        "duration_ms": duration_ms,
+                        "status": status,
+                        "timestamp": event.timestamp.isoformat()
+                        if event.timestamp
+                        else None,
+                    }
+                )
+            else:
+                merged.append(
+                    {
+                        "event_id": event.event_id,
+                        "event_type": event_type,
+                        "title": title,
+                        "description": event.description,
+                        "duration_ms": event.duration_ms,
+                        "status": "done",
+                        "timestamp": event.timestamp.isoformat()
+                        if event.timestamp
+                        else None,
+                    }
+                )
+
+        return merged
+
+    def _build_event_title(self, event) -> str:
+        """Build a descriptive title for an event using its context.
+
+        Args:
+            event: SystemEvent object
+
+        Returns:
+            Human-readable title with context
+        """
+        event_type = event.event_type.value
+        original_title = event.title or ""
+        description = event.description or ""
+
+        if event_type == "llm_thinking":
+            agent_name = ""
+            if description.startswith("Agent:"):
+                agent_name = description.replace("Agent:", "").strip()
+            if agent_name:
+                return f"{agent_name} 思考"
+            return "LLM 思考"
+
+        elif event_type == "action_start":
+            tool_name = original_title.replace("执行 ", "").strip()
+            if description:
+                return f"{tool_name} ({description})"
+            return f"{tool_name}"
+
+        elif event_type == "resource_build_start":
+            if "Manager" in original_title:
+                return "构建 Manager Agent 资源"
+            elif "Agent" in original_title:
+                return "构建 Agent 资源"
+            return "资源构建"
+
+        elif event_type == "agent_instance_create":
+            if description:
+                return f"创建实例 ({description})"
+            return original_title
+
+        elif event_type == "sub_agent_build_start":
+            return "构建子 Agent"
+
+        elif event_type == "agent_build_start":
+            return "构建 Agent"
+
+        elif event_type == "sandbox_create_start":
+            return "创建沙箱"
+
+        elif event_type == "sandbox_init_start":
+            return "初始化沙箱"
+
+        elif event_type == "agent_start":
+            return "Agent 开始运行"
+
+        else:
+            return original_title if original_title else event_type
+
+    def _get_current_action(
+        self, recent_events: List, is_running: bool
+    ) -> Optional[str]:
+        """Get human-readable description of current action.
+
+        Args:
+            recent_events: List of SystemEvent objects
+            is_running: Whether agent is currently running
+
+        Returns:
+            Human-readable current action description
+        """
+        if not is_running:
+            return "执行完成"
+
+        if not recent_events:
+            return "初始化中..."
+
+        latest_event = recent_events[0]
+        event_type = latest_event.event_type.value
+
+        if event_type == "llm_thinking":
+            description = latest_event.description or ""
+            agent_name = (
+                description.replace("Agent:", "").strip()
+                if description.startswith("Agent:")
+                else ""
+            )
+            return f"{agent_name} 思考中..." if agent_name else "思考中..."
+
+        elif event_type == "action_start":
+            title = latest_event.title or ""
+            tool_name = title.replace("执行 ", "").strip()
+            return f"执行 {tool_name}..."
+
+        elif event_type in ["resource_build_start", "resource_loading"]:
+            return "构建资源..."
+
+        elif event_type == "sandbox_create_start":
+            return "创建沙箱..."
+
+        elif event_type == "sandbox_init_start":
+            return "初始化沙箱..."
+
+        elif event_type == "agent_instance_create":
+            return "创建 Agent 实例..."
+
+        elif event_type == "sub_agent_build_start":
+            return "构建子 Agent..."
+
+        elif event_type == "agent_build_start":
+            return "构建 Agent..."
+
+        elif event_type == "agent_start":
+            return "Agent 运行中..."
+
+        else:
+            return latest_event.title or "处理中..."
+
+    def _create_placeholder_planning_space(self, conv_id: str) -> str:
+        """Create a placeholder d-planning-space component for initial rendering.
+
+        This ensures d-system-events always appears after d-planning-space,
+        even when no task nodes exist yet.
+
+        Args:
+            conv_id: Conversation ID
+
+        Returns:
+            Vis string for placeholder planning space
+        """
+        from derisk_ext.vis.common.tags.derisk_planning_space import (
+            PlanningSpace,
+            PlanningSpaceContent,
+        )
+
+        planning_window_content = PlanningSpaceContent(
+            uid=f"{conv_id}_planning",
+            type=UpdateType.INCR.value,
+            agent_role="agent",
+            agent_name="Agent",
+            title=None,
+            description=None,
+            avatar=None,
+            markdown="",
+        )
+        return self.vis_inst(PlanningSpace.vis_tag()).sync_display(
+            content=planning_window_content.to_dict()
+        )

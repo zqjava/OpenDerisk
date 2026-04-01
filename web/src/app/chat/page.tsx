@@ -39,6 +39,7 @@ export default function Chat() {
   const [isShowDetail, setIsShowDetail] = useState<boolean>(true);
   const [chatInParams, setChatInParams] = useState<{ param_type: string; param_value: string; sub_type: string; }[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<SelectedSkill[]>([]);
+  const [currentConvSessionId, setCurrentConvSessionId] = useState<string>(chatId);
   const chatInputRef = useRef<any>(null);
   const { chat, ctrl } = useChat({
     app_code: app_code || '',
@@ -240,6 +241,18 @@ export default function Chat() {
           onMessage: message => {
             setCanAbort(true);
             if (message) {
+              // Check if message is metadata containing conv_session_id
+              if (typeof message === 'object' && message.type === 'metadata') {
+                if (message.conv_session_id) {
+                  setCurrentConvSessionId(message.conv_session_id);
+                }
+                return;
+              }
+              // Check if message is interrupt notification
+              if (typeof message === 'object' && message.type === 'interrupt') {
+                // Handle interrupt - just acknowledge it
+                return;
+              }
               if (data?.incremental) {
                 tempHistory[index].context += message;
                 tempHistory[index].thinking = false;
@@ -306,7 +319,7 @@ export default function Chat() {
         // Handle multiple file resources
         const fileResources = initMessage.resources || (initMessage.resource ? [initMessage.resource] : []);
         
-        if (fileResources.length > 0) {
+if (fileResources.length > 0) {
             const resourceParamIndex = finalChatInParams.findIndex(p => p.param_type === 'resource');
             const resourceLayout = appInfo?.layout?.chat_in_layout?.find(item => item.param_type === 'resource');
             
@@ -317,18 +330,18 @@ export default function Chat() {
                     param_value: JSON.stringify(fileResources)
                 };
                 finalChatInParams = newParams;
-            } else if (resourceLayout) {
+            } else {
                 finalChatInParams = [
                     ...finalChatInParams,
                     {
                         param_type: 'resource',
                         param_value: JSON.stringify(fileResources),
-                        sub_type: resourceLayout.sub_type || 'common_file'
+                        sub_type: resourceLayout?.sub_type || 'common_file'
                     }
                 ];
             }
             
-setResourceValue(fileResources);
+ setResourceValue(fileResources);
         }
         
         // Handle skills - convert to chat_in_params format
@@ -384,7 +397,19 @@ if (initMessage.model) {
 
          setChatInParams(finalChatInParams);
 
-        debouncedChat.run(initMessage.message, {
+        // Build user_input with resources (same as unified-chat-input.tsx)
+        let userContent: UserChatContent;
+        if (fileResources.length > 0) {
+          const messages: any[] = [...fileResources];
+          if (initMessage.message?.trim()) {
+            messages.push({ type: 'text', text: initMessage.message });
+          }
+          userContent = { role: 'user', content: messages };
+        } else {
+          userContent = initMessage.message;
+        }
+
+        debouncedChat.run(userContent, {
           app_code: appInfo?.app_code,
           ...(finalChatInParams?.length && {
             chat_in_params: finalChatInParams,
@@ -402,7 +427,7 @@ if (initMessage.model) {
           <HomeChat />
         </Content>
       ) : (
-        <Spin spinning={appInfoLoading}  wrapperClassName='w-full h-screen'>
+        <Spin spinning={appInfoLoading}  wrapperClassName='w-full h-full'>
           <Content className='flex flex-col h-full'>
             <ChatContentContainer ref={scrollRef} ctrl={ctrl} />
           </Content>
@@ -421,6 +446,7 @@ return (
           chartsData: chartsData || [],
           agent,
           currentDialogue,
+          currentConvSessionId,
           appInfo,
           temperatureValue,
           maxNewTokensValue,
@@ -436,6 +462,7 @@ return (
           setAgent,
           setCanAbort,
           setReplyLoading,
+          setCurrentConvSessionId,
           handleChat,
           refreshDialogList,
           refreshHistory,
@@ -447,7 +474,7 @@ return (
           chatInParams,
         }}
       >
-        <Flex flex={1} className='h-screen'>
+        <Flex flex={1} className='min-h-0 overflow-hidden'>
           <Layout className='bg-gradient-light bg-cover bg-center dark:bg-gradient-dark w-full h-full'>
             <Layout className='bg-transparent h-full'>{contentRender()}</Layout>
           </Layout>

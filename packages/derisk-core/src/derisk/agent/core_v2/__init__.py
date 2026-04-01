@@ -248,14 +248,9 @@ from .tools_v2 import (
     BashTool,
     ReadTool,
     WriteTool,
-    SearchTool,
     ListFilesTool,
-    ThinkTool,
-    QuestionTool,
-    ConfirmTool,
-    NotifyTool,
-    ProgressTool,
-    FileSelectTool,
+    AskUserTool,
+    QuestionTool,  # 向后兼容别名
     register_interaction_tools,
     WebFetchTool,
     WebSearchTool,
@@ -275,13 +270,6 @@ from .tools_v2 import (
     create_action_tools_from_resources,
     ActionTypeMapper,
     default_action_mapper,
-    AnalyzeDataTool,
-    AnalyzeLogTool,
-    AnalyzeCodeTool,
-    ShowChartTool,
-    ShowTableTool,
-    ShowMarkdownTool,
-    GenerateReportTool,
     register_analysis_tools,
     register_all_tools,
     create_default_tool_registry,
@@ -436,6 +424,21 @@ from .se_hooks import (
     SoftwareEngineeringHook,
     SoftwareEngineeringCheckHook,
     create_se_hooks,
+)
+
+# VIS Push Manager
+from .vis_push_manager import (
+    VISPushManager,
+    VISPushConfig,
+    create_vis_push_manager,
+)
+
+# VIS Push Hooks
+from .vis_push_hooks import (
+    VISPushHook,
+    VISPushThinkHook,
+    VISPushToolHook,
+    create_vis_push_hooks,
 )
 
 __all__ = [
@@ -610,14 +613,9 @@ __all__ = [
     "BashTool",
     "ReadTool",
     "WriteTool",
-    "SearchTool",
     "ListFilesTool",
-    "ThinkTool",
-    "QuestionTool",
-    "ConfirmTool",
-    "NotifyTool",
-    "ProgressTool",
-    "FileSelectTool",
+    "AskUserTool",
+    "QuestionTool",  # 向后兼容别名
     "register_interaction_tools",
     "WebFetchTool",
     "WebSearchTool",
@@ -637,13 +635,6 @@ __all__ = [
     "create_action_tools_from_resources",
     "ActionTypeMapper",
     "default_action_mapper",
-    "AnalyzeDataTool",
-    "AnalyzeLogTool",
-    "AnalyzeCodeTool",
-    "ShowChartTool",
-    "ShowTableTool",
-    "ShowMarkdownTool",
-    "GenerateReportTool",
     "register_analysis_tools",
     "register_all_tools",
     "create_default_tool_registry",
@@ -848,7 +839,6 @@ __all__ = [
     "EnhancedProductionAgent",
     # Agent Decorators
     "agent",
-    "think",
     "decide",
     "act",
     "tool",
@@ -904,6 +894,15 @@ __all__ = [
     "MemoryFileSync",
     "PromptFileManager",
     "register_project_memory_hooks",
+    # VIS Push Manager
+    "VISPushManager",
+    "VISPushConfig",
+    "create_vis_push_manager",
+    # VIS Push Hooks
+    "VISPushHook",
+    "VISPushThinkHook",
+    "VISPushToolHook",
+    "create_vis_push_hooks",
 ]
 
 # Enhanced Interaction System
@@ -978,6 +977,14 @@ from .subagent_manager import (
     SubagentRegistry,
     SubagentManager,
     subagent_manager,
+)
+
+# Async Task Manager
+from .async_task_manager import (
+    AsyncTaskStatus,
+    AsyncTaskSpec,
+    AsyncTaskState,
+    AsyncTaskManager,
 )
 
 # Unified Memory Framework

@@ -16,8 +16,13 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Type, Uni
 from pydantic import BaseModel, Field
 
 from .adapter import V2Adapter, V2MessageConverter, V2StreamChunk
+from .action_report_builder import build_action_report_from_chunk
 from ..vis_converter import CoreV2VisWindow3Converter
 from ..visualization.progress import ProgressBroadcaster, ProgressEventType
+from derisk.agent.core.memory.gpts.system_event import (
+    SystemEventManager,
+    SystemEventType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +62,19 @@ class SessionContext:
     metadata: Dict[str, Any] = field(default_factory=dict)
     state: RuntimeState = RuntimeState.IDLE
     message_count: int = 0
-    
+
+    # 应用显示名称（用于 VIS 渲染，避免显示 UUID）
+    app_name: Optional[str] = None
+
     current_message_id: Optional[str] = None
     accumulated_content: str = ""
     is_first_chunk: bool = True
-    
+
     # StorageConversation 用于消息持久化到 ChatHistoryMessageEntity
     storage_conv: Optional[Any] = None
+
+    # SystemEventManager 用于记录和渲染系统事件
+    system_event_manager: Optional[SystemEventManager] = None
 
 
 class V2AgentRuntime:
@@ -89,6 +100,7 @@ class V2AgentRuntime:
         llm_client: Any = None,
         conv_storage: Any = None,
         message_storage: Any = None,
+        interaction_gateway: Any = None,
     ):
         """
         初始化运行时
@@ -102,11 +114,13 @@ class V2AgentRuntime:
             llm_client: LLM 客户端 (用于上下文压缩)
             conv_storage: 会话存储 (用于 StorageConversation)
             message_storage: 消息存储 (用于 ChatHistoryMessageEntity)
+            interaction_gateway: 交互网关 (用于 ask_user 暂停/恢复)
         """
         self.config = config or RuntimeConfig()
         self.gpts_memory = gpts_memory
         self.adapter = adapter or V2Adapter()
         self.progress_broadcaster = progress_broadcaster
+        self._interaction_gateway = interaction_gateway
 
         # Conversation 存储 (用于 ChatHistoryMessageEntity)
         self._conv_storage = conv_storage
@@ -133,6 +147,16 @@ class V2AgentRuntime:
     def state(self) -> RuntimeState:
         return self._state
 
+    def set_interaction_gateway(self, gateway: Any) -> None:
+        """设置交互网关 (用于 ask_user 暂停/恢复)"""
+        self._interaction_gateway = gateway
+        logger.info("[V2Runtime] 交互网关已设置")
+
+    @property
+    def interaction_gateway(self) -> Optional[Any]:
+        """获取交互网关"""
+        return self._interaction_gateway
+
     def register_agent_factory(self, agent_name: str, factory: Callable):
         self._agent_factories[agent_name] = factory
         logger.info(f"[V2Runtime] 注册 Agent 工厂: {agent_name}")
@@ -151,7 +175,10 @@ class V2AgentRuntime:
         # 初始化分层上下文中间件
         if self._enable_hierarchical_context and self.gpts_memory:
             try:
-                from derisk.context.unified_context_middleware import UnifiedContextMiddleware
+                from derisk.context.unified_context_middleware import (
+                    UnifiedContextMiddleware,
+                )
+
                 self._context_middleware = UnifiedContextMiddleware(
                     gpts_memory=self.gpts_memory,
                     llm_client=self._llm_client,
@@ -237,6 +264,7 @@ class V2AgentRuntime:
         # 注册自动记忆钩子
         try:
             from ..filesystem import register_project_memory_hooks
+
             register_project_memory_hooks(self._project_memory)
             logger.info("[V2Runtime] 项目记忆钩子已注册")
         except Exception as e:
@@ -325,6 +353,7 @@ class V2AgentRuntime:
         if self._conv_storage and self._message_storage:
             try:
                 from derisk.core import StorageConversation
+
                 storage_conv = StorageConversation(
                     conv_uid=conv_id,
                     chat_mode="chat_agent",
@@ -339,14 +368,42 @@ class V2AgentRuntime:
             except Exception as e:
                 logger.warning(f"[V2Runtime] 初始化 StorageConversation 失败: {e}")
 
+        # 初始化 SystemEventManager 用于记录系统事件
+        context.system_event_manager = SystemEventManager(conv_id=conv_id)
+        context.system_event_manager.add_event(
+            event_type=SystemEventType.AGENT_BUILD_START,
+            title="初始化 Agent 运行环境",
+            description=f"Agent: {agent_name}",
+        )
+        context.system_event_manager.add_event(
+            event_type=SystemEventType.ENVIRONMENT_READY,
+            title="运行环境就绪",
+        )
+        logger.info(f"[V2Runtime] 初始化 SystemEventManager: {conv_id[:8]}")
+
         self._sessions[session_id] = context
         self._message_queues[session_id] = asyncio.Queue(maxsize=100)
 
         if self.gpts_memory:
-            vis_converter = CoreV2VisWindow3Converter()
+            try:
+                from derisk_ext.vis.derisk.derisk_vis_window3_converter import (
+                    DeriskIncrVisWindow3Converter,
+                )
+
+                vis_converter = DeriskIncrVisWindow3Converter()
+                logger.info(
+                    "[V2Runtime] 使用 DeriskIncrVisWindow3Converter (支持 SystemEvents)"
+                )
+            except ImportError:
+                vis_converter = CoreV2VisWindow3Converter()
+                logger.warning(
+                    "[V2Runtime] DeriskIncrVisWindow3Converter 不可用，使用 CoreV2VisWindow3Converter"
+                )
             await self.gpts_memory.init(conv_id, vis_converter=vis_converter)
 
-        logger.info(f"[V2Runtime] 创建会话: {session_id[:8]}, conv_id: {conv_id[:8]}, vis_converter: vis_window3")
+        logger.info(
+            f"[V2Runtime] 创建会话: {session_id[:8]}, conv_id: {conv_id[:8]}, vis_converter: vis_window3"
+        )
         return context
 
     async def get_session(self, session_id: str) -> Optional[SessionContext]:
@@ -375,6 +432,8 @@ class V2AgentRuntime:
         message: str,
         stream: bool = True,
         enable_context_loading: bool = True,
+        multimodal_contents: Optional[List[Dict[str, Any]]] = None,
+        sandbox_file_refs: Optional[List[Any]] = None,
         **kwargs,
     ) -> AsyncIterator[V2StreamChunk]:
         """
@@ -385,6 +444,8 @@ class V2AgentRuntime:
             message: 用户消息
             stream: 是否流式输出
             enable_context_loading: 是否加载分层上下文
+            multimodal_contents: 多模态内容列表 (图片等)
+            sandbox_file_refs: 沙箱文件引用列表
             **kwargs: 其他参数
 
         Yields:
@@ -406,7 +467,21 @@ class V2AgentRuntime:
         agent = await self._get_or_create_agent(context, kwargs)
         if not agent:
             yield V2StreamChunk(type="error", content="Agent 不存在")
+            if context.system_event_manager:
+                context.system_event_manager.add_event(
+                    event_type=SystemEventType.ERROR_OCCURRED,
+                    title="Agent 创建失败",
+                    description=f"Agent '{context.agent_name}' 不存在",
+                )
             return
+
+        # 记录 Agent 开始执行事件
+        if context.system_event_manager:
+            context.system_event_manager.add_event(
+                event_type=SystemEventType.AGENT_START,
+                title="开始执行任务",
+                description=f"用户输入: {message[:50]}...",
+            )
 
         try:
             conv_id = context.conv_id
@@ -415,25 +490,56 @@ class V2AgentRuntime:
             context_result = None
             if enable_context_loading and self._context_middleware:
                 try:
+                    if context.system_event_manager:
+                        context.system_event_manager.add_event(
+                            event_type=SystemEventType.RESOURCE_LOADING,
+                            title="加载分层上下文",
+                        )
                     context_result = await self._context_middleware.load_context(
                         conv_id=conv_id,
                         task_description=message[:200] if message else None,
                     )
+                    if context.system_event_manager:
+                        context.system_event_manager.add_event(
+                            event_type=SystemEventType.RESOURCE_LOADED,
+                            title="分层上下文加载完成",
+                            description=f"加载了 {context_result.stats.get('chapter_count', 0)} 个章节",
+                        )
                     logger.info(
                         f"[V2Runtime] 已加载分层上下文: conv_id={conv_id[:8]}, "
                         f"chapters={context_result.stats.get('chapter_count', 0)}"
                     )
                 except Exception as e:
                     logger.warning(f"[V2Runtime] 加载分层上下文失败: {e}")
+                    if context.system_event_manager:
+                        context.system_event_manager.add_event(
+                            event_type=SystemEventType.RESOURCE_FAILED,
+                            title="分层上下文加载失败",
+                            description=str(e),
+                        )
 
             # 设置 GptsMemory 到 Agent
             if self.gpts_memory:
                 await self._push_user_message(conv_id, message)
-                await self.gpts_memory.set_agent(conv_id, self._create_sender_proxy(context.agent_name))
+                await self.gpts_memory.set_agent(
+                    conv_id, self._create_sender_proxy(context.agent_name)
+                )
 
-                # 如果 Agent 支持，传入分层上下文
-                if context_result and hasattr(agent, 'set_context'):
+                if context_result and hasattr(agent, "set_context"):
                     agent.set_context(context_result)
+
+            # 处理多模态内容和文件引用
+            if multimodal_contents:
+                kwargs["multimodal_contents"] = multimodal_contents
+                logger.info(
+                    f"[V2Runtime] 传递 multimodal_contents: {len(multimodal_contents)} 项"
+                )
+
+            if sandbox_file_refs:
+                kwargs["sandbox_file_refs"] = sandbox_file_refs
+                logger.info(
+                    f"[V2Runtime] 传递 sandbox_file_refs: {len(sandbox_file_refs)} 项"
+                )
 
             if stream:
                 async for chunk in self._execute_stream(
@@ -448,35 +554,117 @@ class V2AgentRuntime:
 
         except Exception as e:
             logger.exception(f"[V2Runtime] 执行错误: {e}")
+            if context.system_event_manager:
+                context.system_event_manager.add_event(
+                    event_type=SystemEventType.ERROR_OCCURRED,
+                    title="执行错误",
+                    description=str(e),
+                )
             yield V2StreamChunk(type="error", content=str(e))
 
         finally:
+            # 记录 Agent 完成事件
+            if context.system_event_manager:
+                context.system_event_manager.add_event(
+                    event_type=SystemEventType.AGENT_COMPLETE,
+                    title="任务执行完成",
+                )
             context.state = RuntimeState.IDLE
 
     async def _get_or_create_agent(
         self, context: SessionContext, kwargs: Dict
     ) -> Optional[Any]:
         agent_name = context.agent_name
-        logger.debug(f"[V2Runtime] 尝试获取/创建 Agent: {agent_name}, 已注册工厂: {list(self._agent_factories.keys())}")
+        logger.debug(
+            f"[V2Runtime] 尝试获取/创建 Agent: {agent_name}, 已注册工厂: {list(self._agent_factories.keys())}"
+        )
 
         if agent_name in self._agents:
+            agent = self._agents[agent_name]
             logger.debug(f"[V2Runtime] 从缓存获取 Agent: {agent_name}")
-            return self._agents[agent_name]
+
+            # 检查并注入 sandbox_manager（如果 agent 没有）
+            if not getattr(agent, "sandbox_manager", None):
+                sandbox_manager = await self._get_sandbox_manager(context)
+                if sandbox_manager:
+                    agent.sandbox_manager = sandbox_manager
+                    logger.info(
+                        f"[V2Runtime] 注入 sandbox_manager 到缓存 Agent: {agent_name}"
+                    )
+
+            # 注入 GptsMemory（用于VIS推送）
+            if self.gpts_memory and hasattr(agent, "set_gpts_memory"):
+                agent.set_gpts_memory(
+                    self.gpts_memory,
+                    conv_id=context.conv_id,
+                    session_id=context.session_id,
+                )
+                logger.info(f"[V2Runtime] 注入 GptsMemory 到缓存 Agent: {agent_name}")
+            return agent
 
         if agent_name in self._agent_factories:
             agent = await self._create_agent_from_factory(agent_name, context, kwargs)
             if agent:
+                # 注入 GptsMemory（用于VIS推送）
+                if self.gpts_memory and hasattr(agent, "set_gpts_memory"):
+                    agent.set_gpts_memory(
+                        self.gpts_memory,
+                        conv_id=context.conv_id,
+                        session_id=context.session_id,
+                    )
+                    logger.info(
+                        f"[V2Runtime] 注入 GptsMemory 到新创建 Agent: {agent_name}"
+                    )
                 self._agents[agent_name] = agent
             return agent
 
         if "default" in self._agent_factories:
-            logger.info(f"[V2Runtime] Agent '{agent_name}' 未预注册，尝试使用 default 工厂创建")
-            agent = await self._create_agent_from_factory("default", context, {**kwargs, "app_code": agent_name})
+            logger.info(
+                f"[V2Runtime] Agent '{agent_name}' 未预注册，尝试使用 default 工厂创建"
+            )
+            agent = await self._create_agent_from_factory(
+                "default", context, {**kwargs, "app_code": agent_name}
+            )
             if agent:
+                # 注入 GptsMemory（用于VIS推送）
+                if self.gpts_memory and hasattr(agent, "set_gpts_memory"):
+                    agent.set_gpts_memory(
+                        self.gpts_memory,
+                        conv_id=context.conv_id,
+                        session_id=context.session_id,
+                    )
+                    logger.info(
+                        f"[V2Runtime] 注入 GptsMemory 到 default Agent: {agent_name}"
+                    )
                 self._agents[agent_name] = agent
             return agent
 
-        logger.warning(f"[V2Runtime] Agent '{agent_name}' 不在已注册工厂列表中: {list(self._agent_factories.keys())}")
+        logger.warning(
+            f"[V2Runtime] Agent '{agent_name}' 不在已注册工厂列表中: {list(self._agent_factories.keys())}"
+        )
+        return None
+
+    async def _get_sandbox_manager(self, context: SessionContext) -> Optional[Any]:
+        """
+        获取 sandbox_manager（从工厂或配置）
+
+        Args:
+            context: 会话上下文
+
+        Returns:
+            SandboxManager 实例或 None
+        """
+        # 尝试从 agent factory 获取
+        agent_name = context.agent_name
+        factory = self._agent_factories.get(agent_name) or self._agent_factories.get(
+            "default"
+        )
+
+        if factory:
+            # 检查工厂是否有 _get_or_create_sandbox_manager_for_template 方法
+            # 或者工厂所在的组件有这个方法
+            pass
+
         return None
 
     async def _create_agent_from_factory(
@@ -497,7 +685,9 @@ class V2AgentRuntime:
             if agent is None:
                 logger.error(f"[V2Runtime] Agent 工厂返回 None: {agent_name}")
             else:
-                logger.info(f"[V2Runtime] Agent 创建成功: {agent_name}, type={type(agent).__name__}")
+                logger.info(
+                    f"[V2Runtime] Agent 创建成功: {agent_name}, type={type(agent).__name__}"
+                )
             return agent
         except Exception as e:
             logger.exception(f"[V2Runtime] 创建 Agent 失败: {agent_name}, error: {e}")
@@ -513,10 +703,19 @@ class V2AgentRuntime:
         from ..agent_base import AgentBase, AgentState
         from ..enhanced_agent import AgentBase as EnhancedAgentBase
         import sys
+
         # Check both AgentBase types (from agent_base.py and enhanced_agent.py)
         is_agent_base = isinstance(agent, (AgentBase, EnhancedAgentBase))
-        print(f"[_execute_stream] agent type: {type(agent)}, isinstance(AgentBase): {is_agent_base}", file=sys.stderr, flush=True)
-        print(f"[_execute_stream] hasattr generate_reply: {hasattr(agent, 'generate_reply')}", file=sys.stderr, flush=True)
+        print(
+            f"[_execute_stream] agent type: {type(agent)}, isinstance(AgentBase): {is_agent_base}",
+            file=sys.stderr,
+            flush=True,
+        )
+        print(
+            f"[_execute_stream] hasattr generate_reply: {hasattr(agent, 'generate_reply')}",
+            file=sys.stderr,
+            flush=True,
+        )
 
         if is_agent_base:
             print("[_execute_stream] Using AgentBase path", file=sys.stderr, flush=True)
@@ -526,39 +725,209 @@ class V2AgentRuntime:
                 user_id=context.user_id,
             )
             await agent.initialize(agent_context)
-            
-            if self.progress_broadcaster and hasattr(agent, '_progress_broadcaster'):
+
+            if self.progress_broadcaster and hasattr(agent, "_progress_broadcaster"):
                 agent._progress_broadcaster = self.progress_broadcaster
 
-            print(f"[_execute_stream] Calling agent.run with message: {message[:50]}...", file=sys.stderr, flush=True)
+            # 注入交互网关 (用于 ask_user 暂停/恢复)
+            if self._interaction_gateway and hasattr(agent, "set_interaction_gateway"):
+                agent.set_interaction_gateway(self._interaction_gateway)
+                logger.info(
+                    f"[_execute_stream] Injected interaction gateway into agent"
+                )
+
+            # 注入 GptsMemory（用于VIS推送）- backup in case _get_or_create_agent missed it
+            if self.gpts_memory and hasattr(agent, "set_gpts_memory"):
+                if not getattr(agent, "_gpts_memory", None):
+                    agent.set_gpts_memory(
+                        self.gpts_memory,
+                        conv_id=context.conv_id,
+                        session_id=context.session_id,
+                    )
+                    logger.info(f"[_execute_stream] Injected GptsMemory into agent")
+
+            # 处理 sandbox_file_refs: 更新路径并初始化文件
+            sandbox_file_refs = kwargs.pop("sandbox_file_refs", None)
+            if sandbox_file_refs:
+                logger.info(
+                    f"[V2Runtime] Processing {len(sandbox_file_refs)} sandbox_file_refs"
+                )
+
+                sandbox_manager = None
+                sandbox_client = None
+                work_dir = None
+
+                # 优先从 agent 获取 sandbox_manager
+                has_sandbox_manager = hasattr(agent, "sandbox_manager")
+                logger.info(
+                    f"[V2Runtime] agent has sandbox_manager attr: {has_sandbox_manager}"
+                )
+                if has_sandbox_manager:
+                    sandbox_manager = agent.sandbox_manager
+                    logger.info(
+                        f"[V2Runtime] sandbox_manager value: {sandbox_manager is not None}"
+                    )
+                    if sandbox_manager:
+                        sandbox_client = getattr(sandbox_manager, "client", None)
+                        logger.info(
+                            f"[V2Runtime] sandbox_client from manager: {sandbox_client is not None}"
+                        )
+                        if sandbox_client:
+                            work_dir = getattr(sandbox_client, "work_dir", None)
+                            logger.info(
+                                f"[V2Runtime] work_dir from sandbox_client: {work_dir}"
+                            )
+
+                # Fallback: 尝试从 agent 其他属性获取 sandbox_client
+                if not sandbox_client:
+                    if hasattr(agent, "sandbox") and agent.sandbox:
+                        sandbox_client = agent.sandbox
+                        logger.info(
+                            f"[V2Runtime] Got sandbox_client from agent.sandbox"
+                        )
+                    elif hasattr(agent, "_sandbox_client") and agent._sandbox_client:
+                        sandbox_client = agent._sandbox_client
+                        logger.info(
+                            f"[V2Runtime] Got sandbox_client from agent._sandbox_client"
+                        )
+
+                    if sandbox_client:
+                        work_dir = getattr(sandbox_client, "work_dir", None)
+                        logger.info(f"[V2Runtime] work_dir from fallback: {work_dir}")
+
+                # 如果仍然没有 work_dir，尝试从 sandbox_manager 获取
+                if not work_dir and sandbox_manager:
+                    work_dir = getattr(sandbox_manager, "work_dir", None)
+                    logger.info(
+                        f"[V2Runtime] work_dir from sandbox_manager: {work_dir}"
+                    )
+
+                # 终极 fallback：直接创建 sandbox_client 获取 work_dir
+                if not work_dir:
+                    try:
+                        from derisk.sandbox import AutoSandbox
+                        from derisk.configs.model_config import DATA_DIR
+
+                        # 使用默认配置创建临时 sandbox
+                        temp_sandbox = await AutoSandbox.create(
+                            user_id=context.user_id or "default",
+                            agent=context.agent_name or "default",
+                            type="local",
+                        )
+                        work_dir = getattr(temp_sandbox, "work_dir", None)
+                        if work_dir:
+                            sandbox_client = temp_sandbox
+                            logger.info(
+                                f"[V2Runtime] Created temp sandbox, work_dir: {work_dir}"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"[V2Runtime] Failed to create temp sandbox: {e}"
+                        )
+
+                logger.info(
+                    f"[V2Runtime] Final work_dir: {work_dir}, will update sandbox_path"
+                )
+
+                # 关键：无论后续初始化是否成功，都要先更新路径
+                if work_dir:
+                    for ref in sandbox_file_refs:
+                        if hasattr(ref, "sandbox_path") and ref.file_name:
+                            new_path = f"{work_dir}/uploads/{ref.file_name}"
+                            ref.sandbox_path = new_path
+                            logger.info(
+                                f"[V2Runtime] Updated sandbox_path to: {new_path}"
+                            )
+                else:
+                    # 没有 sandbox 信息，使用相对路径
+                    for ref in sandbox_file_refs:
+                        if hasattr(ref, "sandbox_path") and ref.file_name:
+                            ref.sandbox_path = f"uploads/{ref.file_name}"
+                            logger.warning(
+                                f"[V2Runtime] No sandbox work_dir found, using relative path: uploads/{ref.file_name}"
+                            )
+
+                # 初始化文件到 sandbox（如果有 sandbox_manager）
+                if sandbox_manager and sandbox_manager.client:
+                    try:
+                        await self._initialize_sandbox_files(
+                            sandbox_manager, sandbox_file_refs, context.conv_id
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[V2Runtime] Failed to initialize files in sandbox: {e}"
+                        )
+
+                # 追加文件信息到 message（不包含原始查询，避免重复）
+                try:
+                    from derisk_serve.agent.file_io import build_file_info_prompt
+
+                    file_info = build_file_info_prompt(
+                        sandbox_file_refs, sandbox_client
+                    )
+                    if file_info:
+                        message = message + file_info
+                        logger.info(
+                            f"[V2Runtime] Added file info to message: {len(sandbox_file_refs)} files"
+                        )
+                except ImportError:
+                    file_info = "\n\n---\n\n📎 **User uploaded files**:\n"
+                    for ref in sandbox_file_refs:
+                        path = (
+                            ref.get_sandbox_path(sandbox_client)
+                            if hasattr(ref, "get_sandbox_path")
+                            else f"uploads/{ref.file_name}"
+                        )
+                        file_info += f"{path}\n"
+                    message = message + file_info
+
+            print(
+                f"[_execute_stream] Calling agent.run with message: {message[:50]}...",
+                file=sys.stderr,
+                flush=True,
+            )
             chunk_count = 0
             last_chunk = None
             try:
                 async for chunk in agent.run(message, stream=True, **kwargs):
                     chunk_count += 1
-                    print(f"[_execute_stream] Got chunk #{chunk_count}: {str(chunk)[:100]}", file=sys.stderr, flush=True)
+                    print(
+                        f"[_execute_stream] Got chunk #{chunk_count}: {str(chunk)[:100]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                     parsed = self._parse_agent_output(chunk)
-                    
+
                     if self.progress_broadcaster:
                         await self._emit_progress_event(parsed)
-                    
+
                     if last_chunk:
                         yield last_chunk
                     last_chunk = parsed
-                print(f"[_execute_stream] Total chunks: {chunk_count}", file=sys.stderr, flush=True)
-                
+                print(
+                    f"[_execute_stream] Total chunks: {chunk_count}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
                 if last_chunk:
                     last_chunk.is_final = True
                     yield last_chunk
             except Exception as e:
                 logger.exception(f"[_execute_stream] agent.run 执行异常: {e}")
-                error_chunk = V2StreamChunk(type="error", content=f"执行异常: {e}", is_final=True)
+                error_chunk = V2StreamChunk(
+                    type="error", content=f"执行异常: {e}", is_final=True
+                )
                 if self.progress_broadcaster:
                     await self._emit_progress_event(error_chunk)
                 yield error_chunk
 
         elif hasattr(agent, "generate_reply"):
-            print("[_execute_stream] Using generate_reply path", file=sys.stderr, flush=True)
+            print(
+                "[_execute_stream] Using generate_reply path",
+                file=sys.stderr,
+                flush=True,
+            )
             try:
                 response = await agent.generate_reply(
                     received_message={"content": message},
@@ -569,21 +938,29 @@ class V2AgentRuntime:
                 yield V2StreamChunk(type="response", content=content, is_final=True)
             except Exception as e:
                 logger.exception(f"[_execute_stream] generate_reply 执行异常: {e}")
-                yield V2StreamChunk(type="error", content=f"执行异常: {e}", is_final=True)
+                yield V2StreamChunk(
+                    type="error", content=f"执行异常: {e}", is_final=True
+                )
 
         else:
-            print("[_execute_stream] Unsupported agent type!", file=sys.stderr, flush=True)
-            yield V2StreamChunk(type="error", content="不支持的 Agent 类型", is_final=True)
-    
+            print(
+                "[_execute_stream] Unsupported agent type!", file=sys.stderr, flush=True
+            )
+            yield V2StreamChunk(
+                type="error", content="不支持的 Agent 类型", is_final=True
+            )
+
     async def _emit_progress_event(self, chunk: V2StreamChunk):
         if not self.progress_broadcaster:
             return
-        
+
         if chunk.type == "thinking":
             await self.progress_broadcaster.thinking(chunk.content, **chunk.metadata)
         elif chunk.type == "tool_call":
             tool_name = chunk.metadata.get("tool_name", "unknown")
-            await self.progress_broadcaster.tool_started(tool_name, chunk.metadata.get("args", {}))
+            await self.progress_broadcaster.tool_started(
+                tool_name, chunk.metadata.get("args", {})
+            )
         elif chunk.type == "tool_result":
             tool_name = chunk.metadata.get("tool_name", "unknown")
             await self.progress_broadcaster.tool_completed(tool_name, chunk.content)
@@ -613,14 +990,96 @@ class V2AgentRuntime:
     def _parse_agent_output(self, output: str) -> V2StreamChunk:
         is_final = False
 
-        if output.startswith("[THINKING]"):
+        if output.startswith("[TOOL_START:"):
+            # 格式: [TOOL_START:tool_name:action_id:json_args]
+            try:
+                inner = output.strip().lstrip("[TOOL_START:").rstrip("]")
+                parts = inner.split(":", 2)
+                tool_name = parts[0] if len(parts) > 0 else "unknown"
+                action_id = parts[1] if len(parts) > 1 else ""
+                tool_args = {}
+                if len(parts) > 2:
+                    import json as _json
+
+                    tool_args = _json.loads(parts[2])
+            except Exception:
+                tool_name = "unknown"
+                action_id = ""
+                tool_args = {}
+            return V2StreamChunk(
+                type="tool_start",
+                content=tool_name,
+                metadata={
+                    "tool_name": tool_name,
+                    "action_id": action_id,
+                    "tool_args": tool_args,
+                },
+            )
+        elif output.startswith("[TOOL_RESULT:"):
+            # 格式: [TOOL_RESULT:tool_name:action_id:json_meta]\ncontent
+            try:
+                first_line_end = output.find("]\n")
+                if first_line_end > 0:
+                    header = output[: first_line_end + 1]
+                    content = output[first_line_end + 2 :]
+                else:
+                    header = output.strip()
+                    content = ""
+                inner = header.strip().lstrip("[TOOL_RESULT:").rstrip("]")
+                parts = inner.split(":", 2)
+                tool_name = parts[0] if len(parts) > 0 else "unknown"
+                action_id = parts[1] if len(parts) > 1 else ""
+                success = True
+                if len(parts) > 2:
+                    import json as _json
+
+                    meta = _json.loads(parts[2])
+                    success = meta.get("success", True)
+            except Exception:
+                tool_name = "unknown"
+                action_id = ""
+                success = True
+                content = output
+            return V2StreamChunk(
+                type="tool_result",
+                content=content,
+                metadata={
+                    "tool_name": tool_name,
+                    "action_id": action_id,
+                    "success": success,
+                },
+            )
+        elif output.startswith("[ASK_USER:"):
+            # 格式: [ASK_USER:request_id]
+            try:
+                request_id = output.strip().lstrip("[ASK_USER:").rstrip("]")
+            except Exception:
+                request_id = ""
+            return V2StreamChunk(
+                type="ask_user",
+                content="",
+                metadata={"request_id": request_id},
+            )
+        elif output.startswith("[ASK_USER_CANCELLED:"):
+            try:
+                request_id = output.strip().lstrip("[ASK_USER_CANCELLED:").rstrip("]")
+            except Exception:
+                request_id = ""
+            return V2StreamChunk(
+                type="ask_user_cancelled",
+                content="User interaction cancelled or timed out",
+                metadata={"request_id": request_id},
+            )
+        elif output.startswith("[THINKING]"):
             content = output.replace("[THINKING]", "").replace("[/THINKING]", "")
             return V2StreamChunk(type="thinking", content=content)
         elif output.startswith("[TOOL:"):
             match = output.split("]")
             if len(match) >= 2:
                 tool_name = match[0].replace("[TOOL:", "")
-                content = match[1].replace("[/TOOL]", "") if "[/TOOL]" in output else match[1]
+                content = (
+                    match[1].replace("[/TOOL]", "") if "[/TOOL]" in output else match[1]
+                )
             else:
                 tool_name = "unknown"
                 content = output
@@ -633,7 +1092,9 @@ class V2AgentRuntime:
             content = output.replace("[ERROR]", "").replace("[/ERROR]", "")
             return V2StreamChunk(type="error", content=content)
         elif output.startswith("[TERMINATE]"):
-            content = output.replace("[TERMINATE]", "").replace("[/TERMINATE]", "").strip()
+            content = (
+                output.replace("[TERMINATE]", "").replace("[/TERMINATE]", "").strip()
+            )
             return V2StreamChunk(type="response", content=content, is_final=True)
         elif output.startswith("[WARNING]"):
             content = output.replace("[WARNING]", "").replace("[/WARNING]", "")
@@ -671,18 +1132,28 @@ class V2AgentRuntime:
 
         # 保存到 GptsMemory (gpts_messages 表)
         if self.gpts_memory:
-            user_msg = type(
-                "GptsMessage",
-                (),
-                {
-                    "message_id": str(uuid.uuid4().hex),
-                    "conv_id": conv_id,
-                    "sender": "user",
-                    "receiver": "assistant",
-                    "content": message,
-                    "rounds": 0,
-                },
-            )()
+            # Find the session to get additional info
+            session = None
+            for s in self._sessions.values():
+                if s.conv_id == conv_id:
+                    session = s
+                    break
+
+            # Create a proper GptsMessage with all required attributes
+            user_msg = GptsMessage(
+                conv_id=conv_id,
+                conv_session_id=session.session_id if session else conv_id,
+                message_id=str(uuid.uuid4().hex),
+                sender="user",
+                sender_name="user",
+                receiver="assistant",
+                receiver_name="assistant",
+                role="user",
+                content=message,
+                rounds=0,
+                app_code=session.agent_name if session else None,
+                app_name=session.agent_name if session else None,
+            )
             await self.gpts_memory.append_message(conv_id, user_msg, save_db=True)
 
         # 同时保存到 StorageConversation (ChatHistoryMessageEntity 表)
@@ -691,24 +1162,25 @@ class V2AgentRuntime:
             if s.conv_id == conv_id:
                 session = s
                 break
-        
+
         if session and session.storage_conv:
             try:
                 session.storage_conv.add_user_message(message)
-                logger.info(f"[V2Runtime] 用户消息已保存到 StorageConversation: {conv_id[:8]}")
+                logger.info(
+                    f"[V2Runtime] 用户消息已保存到 StorageConversation: {conv_id[:8]}"
+                )
             except Exception as e:
-                logger.warning(f"[V2Runtime] 保存用户消息到 StorageConversation 失败: {e}")
+                logger.warning(
+                    f"[V2Runtime] 保存用户消息到 StorageConversation 失败: {e}"
+                )
 
     async def _push_stream_chunk(self, conv_id: str, chunk: V2StreamChunk):
-        if not self.gpts_memory:
-            return
-
         session = None
         for s in self._sessions.values():
             if s.conv_id == conv_id:
                 session = s
                 break
-        
+
         if not session:
             logger.warning(f"Session not found for conv_id: {conv_id}")
             return
@@ -721,102 +1193,210 @@ class V2AgentRuntime:
         if chunk.type == "response":
             session.accumulated_content += chunk.content or ""
 
-        is_thinking = chunk.type == "thinking"
-        stream_msg = {
-            "uid": session.current_message_id,
-            "type": "incr",
-            "message_id": session.current_message_id,
-            "conv_id": conv_id,
-            "conv_session_uid": session.session_id,
-            "goal_id": session.current_message_id,
-            "task_goal_id": session.current_message_id,
-            "sender": session.agent_name,
-            "sender_name": session.agent_name,
-            "sender_role": "assistant",
-            "thinking": chunk.content if is_thinking else None,
-            "content": "" if is_thinking else (chunk.content or ""),
-            "prev_content": session.accumulated_content,
-            "start_time": datetime.now(),
-        }
+        # 记录系统事件
+        if session.system_event_manager:
+            if chunk.type == "thinking" and session.is_first_chunk:
+                # 第一次 thinking 时记录 LLM 开始思考
+                session.system_event_manager.add_event(
+                    event_type=SystemEventType.LLM_THINKING,
+                    title="LLM 思考",
+                    description=f"Agent: {session.app_name or session.agent_name}",
+                )
+            elif chunk.type == "tool_start":
+                # 工具开始执行
+                tool_name = (
+                    chunk.metadata.get("tool_name", "未知工具")
+                    if chunk.metadata
+                    else "未知工具"
+                )
+                session.system_event_manager.add_event(
+                    event_type=SystemEventType.ACTION_START,
+                    title=f"执行 {tool_name}",
+                )
+            elif chunk.type == "tool_result":
+                # 工具执行完成
+                tool_name = (
+                    chunk.metadata.get("tool_name", "未知工具")
+                    if chunk.metadata
+                    else "未知工具"
+                )
+                status = (
+                    chunk.metadata.get("status", "done") if chunk.metadata else "done"
+                )
+                event_type = (
+                    SystemEventType.ACTION_COMPLETE
+                    if status == "done"
+                    else SystemEventType.ACTION_FAILED
+                )
+                session.system_event_manager.add_event(
+                    event_type=event_type,
+                    title=f"{tool_name} 完成",
+                )
 
-        await self.gpts_memory.push_message(
-            conv_id,
-            stream_msg=stream_msg,
-            is_first_chunk=session.is_first_chunk,
-        )
-        
-        if session.is_first_chunk:
-            session.is_first_chunk = False
-        
+        # Push to GptsMemory streaming (only if available)
+        if self.gpts_memory:
+            is_thinking = chunk.type == "thinking"
+            is_tool = chunk.type in ("tool_start", "tool_result")
+            stream_msg = {
+                "uid": session.current_message_id,
+                "type": "incr",
+                "message_id": session.current_message_id,
+                "conv_id": conv_id,
+                "conv_session_uid": session.session_id,
+                "goal_id": session.current_message_id,
+                "task_goal_id": session.current_message_id,
+                "sender": session.agent_name,
+                "sender_name": session.app_name or session.agent_name,
+                "sender_role": "assistant",
+                "model": chunk.metadata.get("model") if chunk.metadata else None,
+                "thinking": chunk.content if is_thinking else None,
+                "content": "" if (is_thinking or is_tool) else (chunk.content or ""),
+                "prev_content": session.accumulated_content,
+                "start_time": datetime.now(),
+            }
+
+            # 为工具类型的 chunk 构建 action_report
+            if is_tool:
+                action_report = build_action_report_from_chunk(chunk)
+                if action_report:
+                    stream_msg["action_report"] = action_report
+
+            await self.gpts_memory.push_message(
+                conv_id,
+                stream_msg=stream_msg,
+                is_first_chunk=session.is_first_chunk,
+                event_manager=session.system_event_manager,
+            )
+
+            if session.is_first_chunk:
+                session.is_first_chunk = False
+
         if chunk.is_final:
             # 生成 vis_window3 最终视图用于持久化
             # 历史会话加载时，前端需要 vis_window3 格式才能正确渲染
             vis_final_content = session.accumulated_content
             if session.accumulated_content:
                 try:
-                    from derisk.agent.core.memory.gpts.base import GptsMessage as GptsMsg
-                    vis_converter = CoreV2VisWindow3Converter()
+                    from derisk.agent.core.memory.gpts.base import (
+                        GptsMessage as GptsMsg,
+                    )
+
+                    # 使用 DeriskIncrVisWindow3Converter 以支持 SystemEvents
+                    try:
+                        from derisk_ext.vis.derisk.derisk_vis_window3_converter import (
+                            DeriskIncrVisWindow3Converter,
+                        )
+
+                        vis_converter = DeriskIncrVisWindow3Converter()
+                    except ImportError:
+                        vis_converter = CoreV2VisWindow3Converter()
+
                     # 构建 GptsMessage 供 final_view 使用
                     final_gpt_msg = GptsMsg(
                         conv_id=conv_id,
                         conv_session_id=session.session_id,
                         sender=session.agent_name,
-                        sender_name=session.agent_name,
+                        sender_name=session.app_name or session.agent_name,
                         message_id=session.current_message_id or str(uuid.uuid4().hex),
                         role="assistant",
                         content=session.accumulated_content,
                         receiver="user",
                         rounds=0,
                     )
-                    vis_view = await vis_converter.final_view(
+
+                    # 构建流式消息数据
+                    final_stream_msg = {
+                        "uid": session.current_message_id,
+                        "type": "incr",
+                        "message_id": session.current_message_id,
+                        "conv_id": conv_id,
+                        "conv_session_uid": session.session_id,
+                        "goal_id": session.current_message_id,
+                        "task_goal_id": session.current_message_id,
+                        "sender": session.agent_name,
+                        "sender_name": session.app_name or session.agent_name,
+                        "sender_role": "assistant",
+                        "content": session.accumulated_content,
+                        "prev_content": "",
+                        "start_time": datetime.now(),
+                    }
+
+                    # 传递 event_manager 到 visualization
+                    vis_view = await vis_converter.visualization(
                         messages=[final_gpt_msg],
                         gpt_msg=final_gpt_msg,
+                        stream_msg=final_stream_msg,
+                        is_first_chunk=True,
+                        is_first_push=True,
+                        senders_map={},
+                        main_agent_name=session.agent_name,
+                        event_manager=session.system_event_manager,
+                        conv_id=conv_id,
                     )
                     if vis_view:
                         vis_final_content = vis_view
-                        logger.info(f"[V2Runtime] 生成 vis_window3 最终视图: {conv_id[:8]}")
+                        logger.info(
+                            f"[V2Runtime] 生成 vis_window3 最终视图 (含 SystemEvents): {conv_id[:8]}"
+                        )
                 except Exception as e:
-                    logger.warning(f"[V2Runtime] 生成 vis_window3 最终视图失败，回退到纯文本: {e}")
+                    logger.warning(
+                        f"[V2Runtime] 生成 vis_window3 最终视图失败，回退到纯文本: {e}"
+                    )
 
             # 保存到 GptsMemory (gpts_messages 表)
             if self.gpts_memory and session.accumulated_content:
-                assistant_msg = type(
-                    "GptsMessage",
-                    (),
-                    {
-                        "message_id": session.current_message_id or str(uuid.uuid4().hex),
-                        "conv_id": conv_id,
-                        "sender": session.agent_name,
-                        "receiver": "user",
-                        "content": vis_final_content,
-                        "rounds": 0,
-                    },
-                )()
-                await self.gpts_memory.append_message(conv_id, assistant_msg, save_db=True)
+                # Create a proper GptsMessage with all required attributes
+                assistant_msg = GptsMessage(
+                    conv_id=conv_id,
+                    conv_session_id=session.session_id,
+                    message_id=session.current_message_id or str(uuid.uuid4().hex),
+                    sender=session.agent_name,
+                    sender_name=session.app_name or session.agent_name,
+                    receiver="user",
+                    receiver_name="user",
+                    role="assistant",
+                    content=vis_final_content,
+                    rounds=0,
+                    app_code=session.agent_name,
+                    app_name=session.app_name or session.agent_name,
+                )
+                await self.gpts_memory.append_message(
+                    conv_id, assistant_msg, save_db=True
+                )
 
             # 同时保存到 StorageConversation (ChatHistoryMessageEntity 表)
             if session.storage_conv and session.accumulated_content:
                 try:
                     session.storage_conv.add_view_message(vis_final_content)
                     session.storage_conv.end_current_round()
-                    logger.info(f"[V2Runtime] AI消息已保存到 StorageConversation: {conv_id[:8]}")
+                    logger.info(
+                        f"[V2Runtime] AI消息已保存到 StorageConversation: {conv_id[:8]}"
+                    )
                 except Exception as e:
-                    logger.warning(f"[V2Runtime] 保存AI消息到 StorageConversation 失败: {e}")
-            
+                    logger.warning(
+                        f"[V2Runtime] 保存AI消息到 StorageConversation 失败: {e}"
+                    )
+
             session.current_message_id = None
             session.accumulated_content = ""
             session.is_first_chunk = True
 
     def _create_sender_proxy(self, agent_name: str):
         """创建一个最小的 sender 代理对象，用于 VIS 转换器"""
+
         class SenderProxy:
             def __init__(self, name):
                 self.name = name
                 self.role = "assistant"
-                self.agent_context = type('obj', (object,), {
-                    'conv_session_id': name,
-                    'agent_app_code': name,
-                })()
+                self.agent_context = type(
+                    "obj",
+                    (object,),
+                    {
+                        "conv_session_id": name,
+                        "agent_app_code": name,
+                    },
+                )()
+
         return SenderProxy(agent_name)
 
     async def _cleanup_loop(self):
@@ -946,3 +1526,44 @@ class V2AgentRuntime:
             return {"error": "Context not available"}
 
         return self._context_middleware.get_statistics(context.conv_id)
+
+    async def _initialize_sandbox_files(
+        self,
+        sandbox_manager: Any,
+        sandbox_file_refs: List[Any],
+        conv_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        初始化 sandbox 文件：更新路径并将文件写入 sandbox
+
+        Args:
+            sandbox_manager: Sandbox 管理器
+            sandbox_file_refs: SandboxFileRef 列表
+            conv_id: 会话 ID
+
+        Returns:
+            初始化结果
+        """
+        from derisk_serve.agent.file_io import initialize_files_in_sandbox
+
+        if not sandbox_manager or not sandbox_manager.client:
+            logger.warning(
+                "[V2Runtime] No sandbox client available, skipping file initialization"
+            )
+            return {"success": [], "failed": [], "skipped": []}
+
+        sandbox_client = sandbox_manager.client
+
+        # 初始化文件到 sandbox（路径已在外部更新）
+        results = await initialize_files_in_sandbox(
+            sandbox=sandbox_client,
+            sandbox_file_refs=sandbox_file_refs,
+            conv_id=conv_id,
+        )
+
+        logger.info(
+            f"[V2Runtime] File initialization: {len(results.get('success', []))} success, "
+            f"{len(results.get('failed', []))} failed"
+        )
+
+        return results

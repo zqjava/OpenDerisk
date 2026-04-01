@@ -40,7 +40,7 @@ const customeTags: string[] = ['custom-view', 'chart-view', 'references', 'summa
 
 function matchCustomeTagValues(context: string) {
   const matchValues = customeTags.reduce<string[]>((acc, tagName) => {
-    // eslint-disable-next-line no-useless-escape
+     
     const tagReg = new RegExp(`<${tagName}[^>]*\/?>`, 'gi');
     context = context.replace(tagReg, matchVal => {
       acc.push(matchVal);
@@ -348,9 +348,11 @@ export const basicComponents: { [key: string]: (props: any) => React.ReactNode }
   },
   table({ children }) {
     return (
-      <table className='my-2 rounded-tl-md rounded-tr-md  bg-white dark:bg-gray-800 text-sm rounded-lg overflow-hidden'>
-        {children}
-      </table>
+      <div className='my-2 overflow-x-auto'>
+        <table className='rounded-tl-md rounded-tr-md bg-white dark:bg-gray-800 text-sm rounded-lg overflow-hidden'>
+          {children}
+        </table>
+      </div>
     );
   },
   thead({ children }) {
