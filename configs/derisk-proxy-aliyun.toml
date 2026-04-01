@@ -29,7 +29,7 @@ temperature = 0.5
 [[agent.llm.provider]]
 provider = "openai"
 api_base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-api_key = "${DASHSCOPE_API_KEY_2:-sk-...}"
+api_key = "sk-b882358e22b04b279860a45a9c89764f"
 
 [[agent.llm.provider.model]]
 name = "deepseek-r1"
@@ -62,24 +62,24 @@ type = "file"
 # Default backend for file server
 default_backend = "oss"
 
-[[serves.backends]]
-type = "oss"
-endpoint = "https://oss-cn-beijing.aliyuncs.com"
-region = "oss-cn-beijing"
-access_key_id = "${env:OSS_ACCESS_KEY_ID:-xxx}"
-access_key_secret = "${env:OSS_ACCESS_KEY_SECRET:-xxx}"
-fixed_bucket = "openderisk"
-
-
-[sandbox]
-type="local"
-template_id=""
-user_id="derisk"
-agent_name="derisk"
-repo_url=""
-work_dir="/home/ubuntu"
-skill_dir="/mnt/derisk/skills"
-oss_ak="${env:OSS_ACCESS_KEY_ID:-xxx}"
-oss_sk="${env:OSS_ACCESS_KEY_SECRET:-xxx}"
-oss_endpoint="https://oss-cn-beijing.aliyuncs.com"
-oss_bucket_name="openderisk"
+#[[serves.backends]]
+#type = "oss"
+#endpoint = "https://oss-cn-beijing.aliyuncs.com"
+#region = "oss-cn-beijing"
+#access_key_id = "${env:OSS_ACCESS_KEY_ID:-xxx}"
+#access_key_secret = "${env:OSS_ACCESS_KEY_SECRET:-xxx}"
+#fixed_bucket = "openderisk"
+#
+#
+#[sandbox]
+#type="local"
+#template_id=""
+#user_id="derisk"
+#agent_name="derisk"
+#repo_url=""
+#work_dir="/home/ubuntu"
+#skill_dir="/mnt/derisk/skills"
+#oss_ak="${env:OSS_ACCESS_KEY_ID:-xxx}"
+#oss_sk="${env:OSS_ACCESS_KEY_SECRET:-xxx}"
+#oss_endpoint="https://oss-cn-beijing.aliyuncs.com"
+#oss_bucket_name="openderisk"
