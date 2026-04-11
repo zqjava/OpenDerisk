@@ -24,6 +24,15 @@
       "color": "#4A90E2"
     }
   },
+  "agent": {
+    "llm": {
+      "provider": "proxy/openai",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "sk-b882358e22b04b279860a45a9c89764f",
+      "model": "qwen-plus"
+    }
+  },
   "sandbox": {
     "enabled": false,
     "image": "python:3.11-slim",
