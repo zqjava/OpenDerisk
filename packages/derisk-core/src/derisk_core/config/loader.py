@@ -14,13 +14,12 @@ class ConfigLoader:
 
     DEFAULT_CONFIG_NAME = "derisk.json"
     # 默认配置文件路径优先级：用户目录下的 .derisk/derisk.json
-    DEFAULT_CONFIG_PATH = Path.home() / ".derisk" / "derisk.json"
+    DEFAULT_CONFIG_PATH = Path.cwd() / ".derisk" / "derisk.json"
 
     logger.info(f"===zq===加载llm配置path：{DEFAULT_CONFIG_PATH}")
     DEFAULT_LOCATIONS = [
         Path.cwd() / ".derisk" / "derisk.json",   # 项目目录下的配置
-        Path.cwd() / "derisk.json",
-        Path.home() / ".derisk" / "config.json",
+        # Path.home() / ".derisk" / "config.json",
     ]
 
     @classmethod

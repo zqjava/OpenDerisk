@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 ROOT_PATH = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(ROOT_PATH)
 
-DEFAULT_JSON_CONFIG_PATH = Path.home() / ".derisk" / "derisk.json"
+DEFAULT_JSON_CONFIG_PATH = Path.cwd() / ".derisk" / "derisk.json"
 
 
 def init_json_config_manager():
