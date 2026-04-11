@@ -119,8 +119,10 @@ class CoreV2Component(BaseComponent):
                 from derisk_core.config import ConfigManager
 
                 cfg = ConfigManager.get()
+
+                # 首先尝试获取 agent_llm 配置（前端格式 providers）
                 agent_llm_conf = getattr(cfg, "agent_llm", None)
-                if agent_llm_conf:
+                if agent_llm_conf and agent_llm_conf.providers:
                     from derisk_app.openapi.api_v1.config_api import (
                         _convert_agent_llm_to_system_format,
                     )
@@ -129,8 +131,23 @@ class CoreV2Component(BaseComponent):
                     # 同时设置到 system_app.config，方便后续使用
                     self.system_app.config.set("agent.llm", global_agent_conf)
                     logger.info(
-                        "[CoreV2Component] 从 ConfigManager 加载了 agent_llm 配置"
+                        "[CoreV2Component] 从 ConfigManager.agent_llm 加载了配置"
                     )
+                else:
+                    # 如果 agent_llm 为空，尝试读取 app_config 中的 agent.llm（后端格式 provider）
+                    app_config = getattr(cfg, "app_config", None) or getattr(
+                        cfg, "_config", None
+                    )
+                    if app_config:
+                        agent_conf = getattr(app_config, "agent", None)
+                        if agent_conf and isinstance(agent_conf, dict):
+                            global_agent_conf = agent_conf.get("llm")
+                            if global_agent_conf:
+                                # 同时设置到 system_app.config
+                                self.system_app.config.set("agent.llm", global_agent_conf)
+                                logger.info(
+                                    "[CoreV2Component] 从 ConfigManager.agent.llm 加载了配置"
+                                )
             except Exception as e:
                 logger.warning(f"[CoreV2Component] 从 ConfigManager 加载配置失败: {e}")
 

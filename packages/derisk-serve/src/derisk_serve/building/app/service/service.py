@@ -1336,6 +1336,49 @@ class Service(BaseService[ServeEntity, ServeRequest, ServerResponse]):
                             f"已从配置加载 {len(model_configs)} 个模型到 ModelConfigCache: {all_models}"
                         )
                         return all_models
+
+            # 【修复】如果 system_app.config 中没有配置，尝试直接从 derisk.json 读取
+            try:
+                from derisk_core.config import ConfigManager
+
+                cfg = ConfigManager.get()
+                # 尝试获取 agent_llm 配置（前端格式）
+                agent_llm_conf = getattr(cfg, "agent_llm", None)
+                if agent_llm_conf and agent_llm_conf.providers:
+                    from derisk_app.openapi.api_v1.config_api import (
+                        _convert_agent_llm_to_system_format,
+                    )
+
+                    agent_llm_dict = _convert_agent_llm_to_system_format(agent_llm_conf)
+                    model_configs = parse_provider_configs(agent_llm_dict)
+                    if model_configs:
+                        ModelConfigCache.register_configs(model_configs)
+                        all_models = ModelConfigCache.get_all_models()
+                        logger.info(
+                            f"从 ConfigManager.agent_llm 加载了 {len(model_configs)} 个模型: {all_models}"
+                        )
+                        return all_models
+
+                # 如果 agent_llm 为空，尝试读取 app_config 中的 agent.llm（后端格式）
+                app_config = getattr(cfg, "app_config", None) or getattr(
+                    cfg, "_config", None
+                    )
+                if app_config:
+                    agent_conf = getattr(app_config, "agent", None)
+                    if agent_conf and isinstance(agent_conf, dict):
+                        agent_llm_conf = agent_conf.get("llm")
+                        if agent_llm_conf:
+                            model_configs = parse_provider_configs(agent_llm_conf)
+                            if model_configs:
+                                ModelConfigCache.register_configs(model_configs)
+                                all_models = ModelConfigCache.get_all_models()
+                                logger.info(
+                                    f"从 ConfigManager.agent.llm 加载了 {len(model_configs)} 个模型: {all_models}"
+                                )
+                                return all_models
+            except Exception as e:
+                logger.warning(f"从 ConfigManager 加载模型配置失败: {e}")
+
         except Exception as e:
             logger.warning(f"从 ModelConfigCache 获取模型列表失败: {str(e)}")
 
