@@ -317,8 +317,9 @@ class AIWrapper:
         return create_config, extra_kwargs
 
     async def create(self, **config):
-        from derisk.agent.util.llm.model_config_cache import ModelConfigCache
+        from derisk.agent.util.llm.model_config_cache import ModelConfigCache,parse_provider_configs
         from derisk.agent.core.llm_config import AgentLLMConfig
+
 
         # merge the input config with the i-th config in the config list
         full_config = {**config}

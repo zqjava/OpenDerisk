@@ -124,7 +124,7 @@ clone_repo() {
         log "OpenDerisk already exists at $INSTALL_DIR"
         log "Updating to latest version..."
         cd "$INSTALL_DIR"
-        git pull origin main
+        git pull origin master
     else
         log "Cloning OpenDerisk repository..."
         mkdir -p "$(dirname "$INSTALL_DIR")"

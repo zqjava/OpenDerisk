@@ -73,7 +73,7 @@ function ensureRepo() {
   if (fs.existsSync(path.join(INSTALL_DIR, '.git'))) {
     log('OpenDerisk already installed, updating...');
     try {
-      execSync('git pull origin main', { 
+      execSync('git pull origin master', {
         cwd: INSTALL_DIR, 
         stdio: 'pipe' 
       });
