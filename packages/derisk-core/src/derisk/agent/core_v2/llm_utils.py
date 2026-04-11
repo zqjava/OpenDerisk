@@ -200,6 +200,8 @@ async def _call_with_llm_config(
         messages.append({"role": "user", "content": message})
         
         model_param = llm_config.llm_param.get(model_name) if llm_config.llm_param else None
+        model_param = model_config
+
         
         gen_kwargs = {
             "messages": messages,
