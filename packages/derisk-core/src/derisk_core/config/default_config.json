@@ -38,7 +38,25 @@
   },
   "agent_llm": {
     "temperature": 0.5,
-    "providers": []
+    "providers": [
+      {
+        "provider": "proxy/openai",
+        "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_ref": "sk-b882358e22b04b279860a45a9c89764f",
+        "models": [
+          {
+            "name": "qwen-plus",
+            "temperature": 0.7,
+            "max_new_tokens": 4096
+          },
+          {
+            "name": "deepseek-r1",
+            "temperature": 0.7,
+            "max_new_tokens": 4096
+          }
+        ]
+      }
+    ]
   },
   "sse": {
     "input_check_interval": 100,
