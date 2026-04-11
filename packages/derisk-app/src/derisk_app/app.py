@@ -278,7 +278,7 @@ def _sync_app_config_to_system_app():
         )
 
         cfg = ConfigManager.get()
-
+        logger.info(f"=========zq=========Config loaded from derisk.json: {cfg}")
         agent_llm_conf = getattr(cfg, "agent_llm", None)
         if not agent_llm_conf:
             logger.info("No agent_llm config in derisk.json")
