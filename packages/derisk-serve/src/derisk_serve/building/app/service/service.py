@@ -1300,6 +1300,7 @@ class Service(BaseService[ServeEntity, ServeRequest, ServerResponse]):
             if not all_models and CFG.SYSTEM_APP and CFG.SYSTEM_APP.config:
                 logger.info("ModelConfigCache 为空，尝试从配置中加载模型...")
                 agent_llm_conf = CFG.SYSTEM_APP.config.get("agent.llm")
+                logger.info(f"======zq agent_llm_conf:{agent_llm_conf}")
                 if not agent_llm_conf:
                     agent_conf = CFG.SYSTEM_APP.config.get("agent")
                     if isinstance(agent_conf, dict):

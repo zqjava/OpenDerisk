@@ -113,6 +113,27 @@ class CoreV2Component(BaseComponent):
             if isinstance(agent_conf, dict):
                 global_agent_conf = agent_conf.get("llm")
 
+        # 【修复】如果仍然为空，尝试从 ConfigManager 直接加载
+        if not global_agent_conf:
+            try:
+                from derisk_core.config import ConfigManager
+
+                cfg = ConfigManager.get()
+                agent_llm_conf = getattr(cfg, "agent_llm", None)
+                if agent_llm_conf:
+                    from derisk_app.openapi.api_v1.config_api import (
+                        _convert_agent_llm_to_system_format,
+                    )
+
+                    global_agent_conf = _convert_agent_llm_to_system_format(agent_llm_conf)
+                    # 同时设置到 system_app.config，方便后续使用
+                    self.system_app.config.set("agent.llm", global_agent_conf)
+                    logger.info(
+                        "[CoreV2Component] 从 ConfigManager 加载了 agent_llm 配置"
+                    )
+            except Exception as e:
+                logger.warning(f"[CoreV2Component] 从 ConfigManager 加载配置失败: {e}")
+
         if global_agent_conf:
             model_configs = parse_provider_configs(global_agent_conf)
             if model_configs:
@@ -120,6 +141,10 @@ class CoreV2Component(BaseComponent):
                 logger.info(
                     f"[CoreV2Component] Registered {len(model_configs)} models to global cache"
                 )
+        else:
+            logger.warning(
+                "[CoreV2Component] 无法获取 agent.llm 配置，ModelConfigCache 将为空"
+            )
 
     async def start(self):
         """启动 Core_v2"""

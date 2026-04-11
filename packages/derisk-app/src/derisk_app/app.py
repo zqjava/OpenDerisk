@@ -296,7 +296,7 @@ def _sync_app_config_to_system_app():
         )
 
         agent_llm_dict = _convert_agent_llm_to_system_format(agent_llm_conf)
-
+        logger.info(f"=======zq=======agent_llm_dict:{agent_llm_dict}")
         system_app.config.set("agent.llm", agent_llm_dict)
 
         model_configs = parse_provider_configs(agent_llm_dict)
