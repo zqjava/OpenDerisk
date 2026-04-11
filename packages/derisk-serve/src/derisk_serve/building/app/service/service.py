@@ -1317,6 +1317,24 @@ class Service(BaseService[ServeEntity, ServeRequest, ServerResponse]):
             if all_models:
                 logger.info(f"从 ModelConfigCache 获取到可用的 LLM 模型: {all_models}")
                 return all_models
+
+            # 【修复】如果 ModelConfigCache 中没有模型，也尝试从配置加载并返回
+            if CFG.SYSTEM_APP and CFG.SYSTEM_APP.config:
+                agent_llm_conf = CFG.SYSTEM_APP.config.get("agent.llm")
+                if not agent_llm_conf:
+                    agent_conf = CFG.SYSTEM_APP.config.get("agent")
+                    if isinstance(agent_conf, dict):
+                        agent_llm_conf = agent_conf.get("llm")
+
+                if agent_llm_conf:
+                    model_configs = parse_provider_configs(agent_llm_conf)
+                    if model_configs:
+                        ModelConfigCache.register_configs(model_configs)
+                        all_models = list(model_configs.keys())
+                        logger.info(
+                            f"已从配置加载 {len(model_configs)} 个模型到 ModelConfigCache: {all_models}"
+                        )
+                        return all_models
         except Exception as e:
             logger.warning(f"从 ModelConfigCache 获取模型列表失败: {str(e)}")
 
