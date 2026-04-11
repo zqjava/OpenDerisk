@@ -24,45 +24,7 @@
       "color": "#4A90E2"
     }
   },
-  "agent": {
-    "llm": {
-      "provider": [
-        {
-          "provider": "proxy/openai",
-          "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-          "api_key": "sk-b882358e22b04b279860a45a9c89764f",
-          "model": [
-            {"name": "qwen-plus"},
-            {"name": "deepseek-r1"}
-          ]
-        }
-      ],
-      "providers": [
-        {
-          "provider": "proxy/openai",
-          "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-          "api_key": "sk-b882358e22b04b279860a45a9c89764f",
-          "model": [
-            {"name": "qwen-plus"},
-            {"name": "deepseek-r1"}
-          ]
-        }
-      ]
-    }
-  },
-  "agent_llm": {
-    "providers": [
-      {
-        "provider": "proxy/openai",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key": "sk-b882358e22b04b279860a45a9c89764f",
-        "model": [
-          {"name": "qwen-plus"},
-          {"name": "deepseek-r1"}
-        ]
-      }
-    ]
-  },
+
   "sandbox": {
     "enabled": false,
     "image": "python:3.11-slim",
