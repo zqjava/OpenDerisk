@@ -1116,6 +1116,29 @@ class CoreV2Component(BaseComponent):
                 )
                 return llm_config
             else:
+                # 【修复】尝试从系统配置获取模型列表作为兜底
+                try:
+                    from derisk_serve.building.app.config import SERVE_SERVICE_COMPONENT_NAME
+                    from derisk_serve.building.app.service.service import Service
+
+                    app_service = self.system_app.get_component(
+                        SERVE_SERVICE_COMPONENT_NAME, Service
+                    )
+                    if app_service:
+                        available_models = app_service._get_available_llm_models()
+                        if available_models:
+                            llm_config = LLMConfig(
+                                llm_client=llm_client,
+                                llm_strategy=LLMStrategyType.Priority,
+                                strategy_context=available_models,
+                            )
+                            logger.info(
+                                f"[CoreV2Component] LLM provider 创建成功, 从系统配置加载模型: {available_models}"
+                            )
+                            return llm_config
+                except Exception as e:
+                    logger.warning(f"从系统配置获取模型列表失败: {e}")
+
                 llm_config = LLMConfig(
                     llm_client=llm_client,
                     llm_strategy=LLMStrategyType.Default,
