@@ -18,7 +18,7 @@ class ConfigLoader:
 
     logger.info(f"===zq===加载llm配置path：{DEFAULT_CONFIG_PATH}")
     DEFAULT_LOCATIONS = [
-        Path.home() / ".derisk" / "derisk.json",  # 优先级最高
+        Path.cwd() / ".derisk" / "derisk.json",   # 项目目录下的配置
         Path.cwd() / "derisk.json",
         Path.home() / ".derisk" / "config.json",
     ]
@@ -144,7 +144,7 @@ class ConfigManager:
             auto_save: 是否在修改配置时自动保存
         """
         cls._auto_save = auto_save
-
+        logger.info(f"===--==zq==--==path:{path}")
         if path is None:
             path = cls.get_default_config_path()
 
