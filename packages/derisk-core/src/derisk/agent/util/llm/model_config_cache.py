@@ -137,7 +137,7 @@ def parse_provider_configs(
     if not global_agent_conf:
         return model_configs
 
-    providers_list = global_agent_conf.get("provider")
+    providers_list = global_agent_conf.get("provider") or global_agent_conf.get("providers")
 
     if not isinstance(providers_list, list):
         return model_configs
@@ -155,7 +155,7 @@ def parse_provider_configs(
         if "api_base" in p_defaults and "base_url" not in p_defaults:
             p_defaults["base_url"] = p_defaults["api_base"]
 
-        p_models = provider_conf.get("model", [])
+        p_models = provider_conf.get("model") or provider_conf.get("models", [])
         if isinstance(p_models, list):
             for m_conf in p_models:
                 if not isinstance(m_conf, dict):
