@@ -1251,6 +1251,14 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         running_agents: Optional[List[str]] = None,
         cache: Optional[Any] = None,
     ):
+        # 🔧 修复：安全检查 senders_map 和 main_agent_name
+        if not senders_map or not main_agent_name or main_agent_name not in senders_map:
+            logger.warning(
+                f"[_running_vis_build] senders_map 或 main_agent_name 无效，跳过工作空间构建: "
+                f"senders_map={senders_map}, main_agent_name={main_agent_name}"
+            )
+            return None
+
         main_agent = senders_map[main_agent_name]
         conv_session_id = main_agent.agent_context.conv_session_id
 
