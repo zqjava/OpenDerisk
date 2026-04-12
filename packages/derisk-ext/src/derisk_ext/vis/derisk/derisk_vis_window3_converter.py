@@ -1263,8 +1263,8 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
             return None
 
         main_agent = senders_map[main_agent_name]
-        conv_session_id = main_agent.agent_context.conv_session_id
-
+        # conv_session_id = main_agent.agent_context.conv_session_id
+        conv_session_id = main_agent.context.conversation_id
         work_items = await self.gen_work_item(
             gpt_msg=gpt_msg,
             stream_msg=stream_msg,
