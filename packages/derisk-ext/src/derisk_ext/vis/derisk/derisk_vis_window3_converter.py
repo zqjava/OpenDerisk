@@ -1061,11 +1061,11 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         main_agent: Optional["ConversableAgent"],
     ) -> FolderNode:
         main_agent_folder = FolderNode(
-            uid=f"{main_agent.agent_context.conv_session_id}_{main_agent.agent_context.agent_app_code}",
+            uid=f"{main_agent.agent_context.conv_session_id}_{main_agent.info.name}",
             type=UpdateType.INCR.value,
             item_type="folder",
             title=main_agent.name,
-            description=main_agent.desc,
+            description='',
             avatar=main_agent.avatar,
             items=[],
         )
