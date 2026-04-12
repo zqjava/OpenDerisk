@@ -76,6 +76,9 @@ class SessionContext:
     # SystemEventManager 用于记录和渲染系统事件
     system_event_manager: Optional[SystemEventManager] = None
 
+    # 🔧 修复：存储 agent 对象用于可视化构建
+    agent: Optional[Any] = None
+
 
 class V2AgentRuntime:
     """
@@ -540,6 +543,9 @@ class V2AgentRuntime:
                 logger.info(
                     f"[V2Runtime] 传递 sandbox_file_refs: {len(sandbox_file_refs)} 项"
                 )
+
+            # 🔧 修复：保存 agent 对象到 context，用于后续可视化构建
+            context.agent = agent
 
             if stream:
                 async for chunk in self._execute_stream(
@@ -1321,6 +1327,17 @@ class V2AgentRuntime:
                         "start_time": datetime.now(),
                     }
 
+                    # 🔧 修复：构建 senders_map，包含 agent 对象
+                    vis_senders_map = {}
+                    try:
+                        if session.agent and hasattr(session.agent, "name"):
+                            vis_senders_map[session.agent.name] = session.agent
+                            logger.debug(
+                                f"[V2Runtime] 构建 senders_map: {session.agent.name}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[V2Runtime] 构建 senders_map 失败: {e}")
+
                     # 传递 event_manager 到 visualization
                     vis_view = await vis_converter.visualization(
                         messages=[final_gpt_msg],
@@ -1328,7 +1345,7 @@ class V2AgentRuntime:
                         stream_msg=final_stream_msg,
                         is_first_chunk=True,
                         is_first_push=True,
-                        senders_map={},
+                        senders_map=vis_senders_map,
                         main_agent_name=session.agent_name,
                         event_manager=session.system_event_manager,
                         conv_id=conv_id,

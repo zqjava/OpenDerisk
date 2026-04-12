@@ -71,22 +71,26 @@ class CoreV2VisAdapter:
         agent_role: str = "assistant",
         conv_id: Optional[str] = None,
         conv_session_id: Optional[str] = None,
+        agent: Optional[Any] = None,  # 🔧 修复：可选的 agent 对象用于可视化构建
     ):
         self.agent_name = agent_name
         self.agent_role = agent_role
         self.conv_id = conv_id or f"conv_{uuid.uuid4().hex[:8]}"
         self.conv_session_id = conv_session_id or f"session_{uuid.uuid4().hex[:8]}"
-        
+
         self.steps: Dict[str, VisStep] = {}
         self.step_order: List[str] = []
         self.current_step_id: Optional[str] = None
-        
+
         self.artifacts: List[VisArtifact] = []
-        
+
         self.thinking_content: Optional[str] = None
         self.content: Optional[str] = None
-        
+
         self._message_counter = 0
+
+        # 🔧 修复：存储 agent 对象用于可视化构建
+        self.agent = agent
     
     def _generate_message_id(self) -> str:
         """生成消息 ID"""
@@ -292,27 +296,38 @@ class CoreV2VisAdapter:
         if use_gpts_format:
             try:
                 from derisk_ext.vis.derisk.derisk_vis_window3_converter import DeriskIncrVisWindow3Converter
-                
+
                 messages = self._steps_to_gpts_messages()
-                
+
                 if not messages:
                     return json.dumps({
                         "planning_window": self.generate_planning_window(),
                         "running_window": self.generate_running_window(),
                     }, ensure_ascii=False)
-                
+
                 converter = DeriskIncrVisWindow3Converter()
-                
+
+                # 🔧 修复：构建 senders_map，包含 agent 对象（如果可用）
+                vis_senders_map = {}
+                try:
+                    if self.agent and hasattr(self.agent, "name"):
+                        vis_senders_map[self.agent.name] = self.agent
+                        logger.debug(
+                            f"[CoreV2VisAdapter] 构建 senders_map: {self.agent.name}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[CoreV2VisAdapter] 构建 senders_map 失败: {e}")
+
                 vis_output = await converter.visualization(
                     messages=messages,
-                    senders_map={},
+                    senders_map=vis_senders_map,
                     main_agent_name=self.agent_name,
                     is_first_chunk=True,
                     is_first_push=True,
                 )
-                
+
                 return vis_output
-                
+
             except ImportError:
                 logger.warning("DeriskIncrVisWindow3Converter not available, using simple format")
                 return json.dumps({
