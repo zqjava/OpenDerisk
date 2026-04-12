@@ -1076,8 +1076,8 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         self,
         main_agent: Optional["ConversableAgent"],
     ) -> Optional[FolderNode]:
-        conv_id = main_agent.agent_context.conv_id
-        conv_session_id = main_agent.agent_context.conv_session_id
+        conv_id = main_agent.context.conversation_id
+        conv_session_id = main_agent.context.conversation_id
 
         file_system_folder = FolderNode(
             uid=f"{conv_session_id}_file_system",
