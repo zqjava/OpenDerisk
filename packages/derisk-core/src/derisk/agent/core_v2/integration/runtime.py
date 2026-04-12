@@ -1334,6 +1334,7 @@ class V2AgentRuntime:
                         logger.info(f"-----zq-----session.agent.info.name: {session.agent.info.name}")
                         if session.agent and hasattr(session.agent.info, "name"):
                             vis_senders_map[session.agent.info.name] = session.agent
+                            vis_senders_map['agent_state'] = session.state
                             logger.debug(
                                 f"[V2Runtime] 构建 senders_map: {session.agent.info.name}"
                             )
