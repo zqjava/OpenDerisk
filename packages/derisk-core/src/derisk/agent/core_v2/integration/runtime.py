@@ -1335,7 +1335,7 @@ class V2AgentRuntime:
                         if session.agent and hasattr(session.agent.info, "name"):
                             vis_senders_map[session.agent.info.name] = session.agent
                             logger.debug(
-                                f"[V2Runtime] 构建 senders_map: {session.agent.name}"
+                                f"[V2Runtime] 构建 senders_map: {session.agent.info.name}"
                             )
                     except Exception as e:
                         logger.warning(f"[V2Runtime] 构建 senders_map 失败: {e}")
