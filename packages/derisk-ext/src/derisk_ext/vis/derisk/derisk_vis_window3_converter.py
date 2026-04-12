@@ -191,7 +191,7 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         running_agents: List[str] = []
         agent_state = senders_map.get('agent_state')
         if agent_state.value == Status.RUNNING.value:
-            running_agents.append(senders_map.get('simple_chat').info.name)
+            running_agents.append(senders_map.get(senders_map.get('agent_name')).info.name)
         # for k, v in senders_map.items():
         #     # agent_state =  v.agent_state
         #     if agent_state == Status.RUNNING:
