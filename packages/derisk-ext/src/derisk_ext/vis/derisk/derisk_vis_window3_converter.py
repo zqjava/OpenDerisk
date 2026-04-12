@@ -190,9 +190,9 @@ class DeriskIncrVisWindow3Converter(DeriskVisIncrConverter):
         ## 并行情况下搜集当前运行中Agent信息
         running_agents: List[str] = []
         for k, v in senders_map.items():
-            agent_state = await v.agent_state()
+            agent_state = await v.info.agent_state()
             if agent_state == Status.RUNNING:
-                running_agents.append(v.name)
+                running_agents.append(v.info.name)
 
         task_manager: TreeManager = kwargs.get("task_manager")
         event_manager = kwargs.get("event_manager")
