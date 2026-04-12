@@ -46,7 +46,8 @@ class AsyncAgentChat(AgentChat):
             conv_session_id=conv_uid,
             app_code=gpts_name,
             user_query=user_query,
-            user_code=user_code
+            user_code=user_code,
+            **ext_info
         )
 
         agent_conv_id, gpts_conversations = await self._initialize_agent_conversation(

@@ -39,7 +39,8 @@ class QuickAgentChat(AgentChat):
             }
         )
 
-        current_message = await self._initialize_conversation(conv_session_id=conv_uid, app_code=gpts_name, user_query=user_query, user_code=user_code)
+        current_message = await self._initialize_conversation(conv_session_id=conv_uid, app_code=gpts_name, user_query=user_query, user_code=user_code,
+            **ext_info)
         agent_conv_id, gpts_conversations = await self._initialize_agent_conversation(conv_session_id=conv_uid, **ext_info)
         span.metadata["conv_id"] = agent_conv_id
 

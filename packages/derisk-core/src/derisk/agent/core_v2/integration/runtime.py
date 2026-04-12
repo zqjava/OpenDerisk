@@ -1330,6 +1330,8 @@ class V2AgentRuntime:
                     # 🔧 修复：构建 senders_map，包含 agent 对象
                     vis_senders_map = {}
                     try:
+                        logger.info(f"-----zq-----session: {session}")
+                        logger.info(f"-----zq-----session.agent: {session.agent}")
                         if session.agent and hasattr(session.agent, "name"):
                             vis_senders_map[session.agent.name] = session.agent
                             logger.debug(

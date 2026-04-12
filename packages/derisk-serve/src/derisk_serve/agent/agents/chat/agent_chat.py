@@ -102,6 +102,7 @@ async def _build_conversation(
     conv_serve: ConversationServe,
     user_name: Optional[str] = "",
     sys_code: Optional[str] = "",
+    **ext_info
 ) -> StorageConversation:
     return await StorageConversation(
         conv_uid=conv_id,
@@ -116,6 +117,7 @@ async def _build_conversation(
         conv_storage=conv_serve.conv_storage,
         message_storage=conv_serve.message_storage,
         async_load=True,
+        **ext_info,
     ).async_load()
 
 
@@ -558,18 +560,22 @@ class AgentChat(BaseComponent, ABC):
         conv_session_id: str,
         app_code: str,
         user_query: Union[str, HumanMessage],
-        user_code: Optional[str] = None,
+        user_code: Optional[str] = None,**ext_info
     ) -> StorageConversation:
         """初始化会话"""
+        model_name = ext_info.get("model_name", "") if ext_info else ""
+        logger.info(f"--------zq---------model_name:{model_name} ")
+        logger.info(f"--------zq---------current_message ")
         conv_serve = ConversationServe.get_instance(CFG.SYSTEM_APP)
         current_message = await _build_conversation(
             conv_id=conv_session_id,
             select_param="",
             summary="",
-            model_name="",
+            model_name=model_name,
             app_code=app_code,
             conv_serve=conv_serve,
             user_name=user_code,
+            ** ext_info
         )
         execute_no_wait(current_message.save_to_storage)
         # current_message.save_to_storage()

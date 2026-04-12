@@ -77,6 +77,7 @@ class SimpleAgentChat(AgentChat):
                 app_code=gpts_name,
                 user_query=user_query,
                 user_code=user_code,
+                **ext_info
             )
 
             (
