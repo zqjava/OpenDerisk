@@ -317,9 +317,11 @@ class V2SimpleAgent(AgentBase):
         self,
         info: AgentInfo,
         model_provider: Optional[Any] = None,
+        agent_parser: Optional[Any] = None,  # ← 新增参数
     ):
         super().__init__(info)
         self.model_provider = model_provider
+        self.agent_parser = agent_parser  # ← 新增赋值
 
     async def think(self, message: str, **kwargs) -> AsyncIterator[str]:
         yield f"思考中..."
@@ -349,6 +351,8 @@ def create_v2_agent(
     model_provider: Optional[Any] = None,
     model_config: Optional[Dict] = None,
     permission: Optional[Dict] = None,
+    agent_parser: Optional[Any] = None,  # ← 新增参数
+
 ) -> AgentBase:
     """
     创建 V2 Agent 的工厂函数
@@ -397,6 +401,7 @@ def create_v2_agent(
         return V2SimpleAgent(
             info=info,
             model_provider=model_provider,
+            agent_parser=agent_parser,  # ← 新增参数（需添加）
         )
 
 
