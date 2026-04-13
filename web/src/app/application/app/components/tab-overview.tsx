@@ -56,11 +56,20 @@ export default function TabOverview() {
   // Initialize form values from appInfo
   useEffect(() => {
     if (appInfo) {
+      console.log('[useEffect-formInit] === START ===');
+      console.log('[useEffect-formInit] appInfo received:', appInfo);
+
       const { layout } = appInfo || {};
+      console.log('[useEffect-formInit] layout from appInfo:', layout);
+      console.log('[useEffect-formInit] layout.chat_layout:', layout?.chat_layout);
+      console.log('[useEffect-formInit] layout.chat_in_layout:', layout?.chat_in_layout);
+
       const engineItem = appInfo?.resources?.find((item: any) => item.type === 'reasoning_engine');
       const engineItemValue = isString(engineItem?.value) ? safeJsonParse(engineItem?.value, {}) : engineItem?.value;
 
       const chat_in_layout_list = layout?.chat_in_layout?.map((item: any) => item.param_type) || [];
+      console.log('[useEffect-formInit] chat_in_layout_list (for form):', chat_in_layout_list);
+
       let chat_in_layout_obj: any = {};
       chat_in_layout_list.forEach((type: string) => {
         const item = layout?.chat_in_layout?.find((i: any) => i.param_type === type);
@@ -79,16 +88,16 @@ export default function TabOverview() {
       const currentAgentVersion = appInfo.agent_version || 'v1';
       const v2TemplateName = appInfo?.team_context?.agent_name || 'simple_chat';
       const teamContext = appInfo?.team_context;
-      const parsedTeamContext = typeof teamContext === 'string' 
-        ? safeJsonParse(teamContext, {}) 
+      const parsedTeamContext = typeof teamContext === 'string'
+        ? safeJsonParse(teamContext, {})
         : (teamContext || {});
-      
+
       const defaultV1Agent = 'BAIZE';
-      const v1AgentValue = currentAgentVersion === 'v1' 
-        ? (appInfo.agent || defaultV1Agent) 
+      const v1AgentValue = currentAgentVersion === 'v1'
+        ? (appInfo.agent || defaultV1Agent)
         : undefined;
-      
-      form.setFieldsValue({
+
+      const formValues = {
         app_name: appInfo.app_name,
         app_describe: appInfo.app_describe,
         agent: v1AgentValue,
@@ -101,14 +110,21 @@ export default function TabOverview() {
         reasoning_engine: engineItemValue?.key ?? engineItemValue?.name,
         use_sandbox: parsedTeamContext?.use_sandbox ?? false,
         ...chat_in_layout_obj,
-      });
-      
+      };
+
+      console.log('[useEffect-formInit] formValues to be set:', formValues);
+      console.log('[useEffect-formInit] formValues.chat_layout:', formValues.chat_layout);
+      console.log('[useEffect-formInit] formValues.chat_in_layout:', formValues.chat_in_layout);
+
+      form.setFieldsValue(formValues);
+
       setAgentVersion(currentAgentVersion);
       setSelectedIcon(appInfo.icon || 'smart-plugin');
-      
+
       if (currentAgentVersion === 'v1' && !appInfo.agent) {
         fetchUpdateApp({ ...appInfo, agent: defaultV1Agent });
       }
+      console.log('[useEffect-formInit] === END ===');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appInfo]);
@@ -171,7 +187,11 @@ export default function TabOverview() {
   const targetOptions = useMemo(() => targetData?.data?.data?.map((o: any) => ({
     ...o, value: o.name, label: (<div className="flex justify-between items-center"><span>{o.name}</span><span className="text-gray-400 text-xs">{o.desc}</span></div>),
   })), [targetData]);
-  const layoutDataOptions = useMemo(() => layoutData?.data?.data?.map((o: any) => ({ ...o, value: o.name, label: `${o.description}[${o.name}]` })), [layoutData]);
+  const layoutDataOptions = useMemo(() => {
+    const options = layoutData?.data?.data?.map((o: any) => ({ ...o, value: o.name, label: `${o.description}[${o.name}]` })) || [];
+    console.log('[layoutDataOptions] Available layout options:', options);
+    return options;
+  }, [layoutData]);
   const reasoningEngineOptions = useMemo(() =>
     reasoningEngineData?.data?.data?.flatMap((item: any) =>
       item.valid_values?.map((o: any) => ({ item: o, value: o.key, label: o.label, selected: true })) || [],
@@ -179,6 +199,17 @@ export default function TabOverview() {
   const chatConfigOptions = useMemo(() => chatConfigData?.data?.data?.map((o: any) => ({ ...o, value: o.param_type, label: o.param_description })), [chatConfigData]);
   const modelOptions = useMemo(() => modelList.map((item: string) => ({ value: item, label: item })), [modelList]);
   const selectedChatConfigs = Form.useWatch('chat_in_layout', form);
+  const selectedChatLayout = Form.useWatch('chat_layout', form);
+
+  // Watch for chat_in_layout changes
+  useEffect(() => {
+    console.log('[FormWatch] selectedChatConfigs (chat_in_layout form value) changed:', selectedChatConfigs);
+  }, [selectedChatConfigs]);
+
+  // Watch for chat_layout changes
+  useEffect(() => {
+    console.log('[FormWatch] selectedChatLayout (chat_layout form value) changed:', selectedChatLayout);
+  }, [selectedChatLayout]);
 
   const is_reasoning_engine_agent = useMemo(() => appInfo?.is_reasoning_engine_agent, [appInfo]);
   
@@ -196,7 +227,13 @@ export default function TabOverview() {
 
   // Layout config change handler
   const layoutConfigChange = () => {
+    console.log('[layoutConfigChange] === START ===');
     const changeFieldValue = form.getFieldValue('chat_in_layout') || [];
+    console.log('[layoutConfigChange] changeFieldValue (chat_in_layout form value):', changeFieldValue);
+    console.log('[layoutConfigChange] appInfo.layout before update:', appInfo.layout);
+    console.log('[layoutConfigChange] appInfo.layout.chat_layout:', appInfo.layout?.chat_layout);
+    console.log('[layoutConfigChange] appInfo.layout.chat_in_layout:', appInfo.layout?.chat_in_layout);
+
     const curConfig = changeFieldValue
       .map((item: string) => {
         const { label, value, sub_types, ...rest } = chatConfigOptions?.find((md: any) => item === md.param_type) || {};
@@ -207,7 +244,19 @@ export default function TabOverview() {
         return chatConfigOptions?.find((md: any) => item.includes(md.param_type)) || {};
       })
       .filter((obj: any) => Object.keys(obj).length > 0);
-    fetchUpdateApp({ ...appInfo, layout: { ...appInfo.layout, chat_in_layout: curConfig } });
+
+    console.log('[layoutConfigChange] curConfig (computed new chat_in_layout):', curConfig);
+
+    const newLayout = { ...appInfo.layout, chat_in_layout: curConfig, chat_layout: appInfo.layout?.chat_layout || null };
+    console.log('[layoutConfigChange] newLayout object to be sent:', newLayout);
+    console.log('[layoutConfigChange] newLayout.chat_layout:', newLayout.chat_layout);
+    console.log('[layoutConfigChange] newLayout.chat_in_layout:', newLayout.chat_in_layout);
+
+    const updatePayload = { ...appInfo, layout: newLayout };
+    console.log('[layoutConfigChange] Full payload to be sent to fetchUpdateApp:', updatePayload);
+
+    fetchUpdateApp(updatePayload);
+    console.log('[layoutConfigChange] === END ===');
   };
 
   const onInputBlur = (name: string) => {
@@ -265,8 +314,26 @@ export default function TabOverview() {
     } else if (fieldName === 'llm_strategy_value') {
       fetchUpdateApp({ ...appInfo, llm_config: { llm_strategy: form.getFieldValue('llm_strategy'), llm_strategy_value: fieldValue as string[] } });
     } else if (fieldName === 'chat_layout') {
+      console.log('[onValuesChange-chat_layout] === START ===');
+      console.log('[onValuesChange-chat_layout] fieldValue (new chat_layout name):', fieldValue);
+      console.log('[onValuesChange-chat_layout] appInfo.layout before update:', appInfo.layout);
+      console.log('[onValuesChange-chat_layout] appInfo.layout.chat_layout:', appInfo.layout?.chat_layout);
+      console.log('[onValuesChange-chat_layout] appInfo.layout.chat_in_layout:', appInfo.layout?.chat_in_layout);
+      console.log('[onValuesChange-chat_layout] layoutDataOptions:', layoutDataOptions);
+
       const currentChatLayout = layoutDataOptions?.find((item: any) => item.value === fieldValue);
-      fetchUpdateApp({ ...appInfo, layout: { ...appInfo.layout, chat_layout: currentChatLayout } });
+      console.log('[onValuesChange-chat_layout] currentChatLayout (found from options):', currentChatLayout);
+
+      const newLayout = { ...appInfo.layout, chat_layout: currentChatLayout, chat_in_layout: appInfo.layout?.chat_in_layout || null };
+      console.log('[onValuesChange-chat_layout] newLayout object to be sent:', newLayout);
+      console.log('[onValuesChange-chat_layout] newLayout.chat_layout:', newLayout.chat_layout);
+      console.log('[onValuesChange-chat_layout] newLayout.chat_in_layout:', newLayout.chat_in_layout);
+
+      const updatePayload = { ...appInfo, layout: newLayout };
+      console.log('[onValuesChange-chat_layout] Full payload to be sent to fetchUpdateApp:', updatePayload);
+
+      fetchUpdateApp(updatePayload);
+      console.log('[onValuesChange-chat_layout] === END ===');
     } else if (fieldName === 'reasoning_engine') {
       const currentEngine = reasoningEngineOptions?.find((item: any) => item.value === fieldValue);
       if (currentEngine) {

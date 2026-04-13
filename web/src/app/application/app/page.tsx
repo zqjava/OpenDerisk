@@ -80,18 +80,33 @@ export default function AgentBuilder() {
 
   // Update agent
   const { runAsync: fetchUpdateApp, loading: fetchUpdateAppLoading } = useRequest(
-    async (app: any) => await apiInterceptors(updateApp(app), notification),
+    async (app: any) => {
+      console.log('[fetchUpdateApp] === START ===');
+      console.log('[fetchUpdateApp] Input app parameter:', JSON.stringify(app, null, 2));
+      console.log('[fetchUpdateApp] app.layout:', app.layout);
+      console.log('[fetchUpdateApp] app.layout.chat_layout:', app.layout?.chat_layout);
+      console.log('[fetchUpdateApp] app.layout.chat_in_layout:', app.layout?.chat_in_layout);
+
+      const result = await apiInterceptors(updateApp(app), notification);
+
+      console.log('[fetchUpdateApp] API response:', result);
+
+      return result;
+    },
     {
       manual: true,
       onSuccess: data => {
         const [, res] = data;
+        console.log('[fetchUpdateApp] onSuccess - response:', res);
         if (!res) {
           message.error(t('application_update_failed'));
           return;
         }
+        console.log('[fetchUpdateApp] onSuccess - setting appInfo:', res);
         setAppInfo(res || ({} as IApp));
       },
       onError: err => {
+        console.error('[fetchUpdateApp] onError - error:', err);
         message.error(t('application_update_failed'));
         console.error('update app error', err);
       },
