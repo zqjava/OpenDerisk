@@ -53,7 +53,7 @@ class ServeConfig(BaseServeConfig):
     )
 
     default_skill_repo_branch: Optional[str] = field(
-        default="main",
+        default="master",
         metadata={"help": "Default git branch for skill repository"},
     )
 
