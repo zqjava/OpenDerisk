@@ -363,6 +363,7 @@ async def sync_git_async(
 ) -> Result[SkillSyncTaskResponse]:
     """Create and start an async git sync task"""
     try:
+        logger.info(f"sync_git_async branch: {request.branch}")
         task = service.create_sync_task(
             repo_url=request.repo_url,
             branch=request.branch,
