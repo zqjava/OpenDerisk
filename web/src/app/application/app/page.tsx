@@ -80,37 +80,71 @@ export default function AgentBuilder() {
 
   // Update agent
   const { runAsync: fetchUpdateApp, loading: fetchUpdateAppLoading } = useRequest(
-    async (app: any) => {
-      console.log('[fetchUpdateApp] === START ===');
-      console.log('[fetchUpdateApp] Input app parameter:', JSON.stringify(app, null, 2));
-      console.log('[fetchUpdateApp] app.layout:', app.layout);
-      console.log('[fetchUpdateApp] app.layout.chat_layout:', app.layout?.chat_layout);
-      console.log('[fetchUpdateApp] app.layout.chat_in_layout:', app.layout?.chat_in_layout);
+      async (app: any) => {
+        console.log('[fetchUpdateApp] === START ===');
+        console.log('[fetchUpdateApp] Input app parameter:', JSON.stringify(app, null, 2));
+        console.log('[fetchUpdateApp] app.layout:', app.layout);
+        console.log('[fetchUpdateApp] app.layout.chat_layout:', app.layout?.chat_layout);
+        console.log('[fetchUpdateApp] app.layout.chat_in_layout:', app.layout?.chat_in_layout);
 
-      const result = await apiInterceptors(updateApp(app), notification);
+        try {
+          const result = await apiInterceptors(updateApp(app), notification);
+          console.log('[fetchUpdateApp] API response:', result);
+          console.log('[fetchUpdateApp] API response type:', typeof result);
+          console.log('[fetchUpdateApp] API response isArray:', Array.isArray(result));
 
-      console.log('[fetchUpdateApp] API response:', result);
+          if (result && Array.isArray(result) && result.length === 2) {
+            const [err, res] = result;
+            console.log('[fetchUpdateApp] Error response:', err);
+            console.log('[fetchUpdateApp] Success response:', res);
 
-      return result;
-    },
-    {
-      manual: true,
-      onSuccess: data => {
-        const [, res] = data;
-        console.log('[fetchUpdateApp] onSuccess - response:', res);
-        if (!res) {
-          message.error(t('application_update_failed'));
-          return;
+            if (err) {
+              console.error('[fetchUpdateApp] Detailed error:', JSON.stringify(err, null, 2));
+              console.error('[fetchUpdateApp] Error message:', err?.message);
+              console.error('[fetchUpdateApp] Error data:', err?.data);
+            }
+          }
+
+          return result;
+        } catch (error) {
+          console.error('[fetchUpdateApp] Exception caught:', error);
+          throw error;
         }
-        console.log('[fetchUpdateApp] onSuccess - setting appInfo:', res);
-        setAppInfo(res || ({} as IApp));
       },
-      onError: err => {
-        console.error('[fetchUpdateApp] onError - error:', err);
-        message.error(t('application_update_failed'));
-        console.error('update app error', err);
+      {
+        manual: true,
+        onSuccess: data => {
+          const [, res] = data;
+          console.log('[fetchUpdateApp] onSuccess - response:', res);
+          if (!res) {
+            message.error(t('application_update_failed'));
+            return;
+          }
+          console.log('[fetchUpdateApp] onSuccess - setting appInfo:', res);
+          setAppInfo(res || ({} as IApp));
+        },
+        onError: err => {
+          console.error('[fetchUpdateApp] onError - error:', err);
+          console.error('[fetchUpdateApp] onError - error details:', JSON.stringify(err, null, 2));
+          console.error('[fetchUpdateApp] onError - error.response:', err?.response);
+          console.error('[fetchUpdateApp] onError - error.response.data:', err?.response?.data);
+
+          // 尝试解析错误详情
+          if (err?.response?.data) {
+            console.error('[fetchUpdateApp] Error details from response:', JSON.stringify(err.response.data, null, 2));
+            const errorData = err.response.data;
+            if (errorData?.detail) {
+              console.error('[fetchUpdateApp] Pydantic validation error detail:', errorData.detail);
+            }
+            if (errorData?.message) {
+              message.error(`更新失败: ${errorData.message}`);
+            }
+          }
+
+          message.error(t('application_update_failed'));
+          console.error('update app error', err);
+        },
       },
-    },
   );
 
   // Version data
