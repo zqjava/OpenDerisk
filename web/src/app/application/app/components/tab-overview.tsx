@@ -247,7 +247,15 @@ export default function TabOverview() {
 
     console.log('[layoutConfigChange] curConfig (computed new chat_in_layout):', curConfig);
 
-    const newLayout = { ...appInfo.layout, chat_in_layout: curConfig, chat_layout: appInfo.layout?.chat_layout || null };
+    // Fix: Only update chat_in_layout, preserve chat_layout if it exists
+    // If chat_layout is null/undefined, don't set it to avoid backend validation error
+    const newLayout: any = { ...appInfo.layout, chat_in_layout: curConfig };
+    if (appInfo.layout?.chat_layout) {
+      newLayout.chat_layout = appInfo.layout.chat_layout;
+    } else {
+      // If no chat_layout exists, we should keep it as is (don't set to null)
+      console.warn('[layoutConfigChange] WARNING: chat_layout is missing, not updating it');
+    }
     console.log('[layoutConfigChange] newLayout object to be sent:', newLayout);
     console.log('[layoutConfigChange] newLayout.chat_layout:', newLayout.chat_layout);
     console.log('[layoutConfigChange] newLayout.chat_in_layout:', newLayout.chat_in_layout);
@@ -324,7 +332,18 @@ export default function TabOverview() {
       const currentChatLayout = layoutDataOptions?.find((item: any) => item.value === fieldValue);
       console.log('[onValuesChange-chat_layout] currentChatLayout (found from options):', currentChatLayout);
 
-      const newLayout = { ...appInfo.layout, chat_layout: currentChatLayout, chat_in_layout: appInfo.layout?.chat_in_layout || null };
+      // Fix: Ensure we have a valid ChatLayout object before updating
+      if (!currentChatLayout) {
+        console.error('[onValuesChange-chat_layout] ERROR: Cannot find ChatLayout for value:', fieldValue);
+        return; // Don't update if we can't find the layout
+      }
+
+      const newLayout: any = { ...appInfo.layout, chat_layout: currentChatLayout };
+      // Preserve chat_in_layout if it exists
+      if (appInfo.layout?.chat_in_layout) {
+        newLayout.chat_in_layout = appInfo.layout.chat_in_layout;
+      }
+
       console.log('[onValuesChange-chat_layout] newLayout object to be sent:', newLayout);
       console.log('[onValuesChange-chat_layout] newLayout.chat_layout:', newLayout.chat_layout);
       console.log('[onValuesChange-chat_layout] newLayout.chat_in_layout:', newLayout.chat_in_layout);
