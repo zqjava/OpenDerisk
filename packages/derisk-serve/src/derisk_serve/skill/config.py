@@ -94,4 +94,4 @@ class ServeConfig(BaseServeConfig):
 
     def get_default_skill_repo_branch(self) -> str:
         """Get default skill repository branch"""
-        return self.default_skill_repo_branch or "main"
+        return self.default_skill_repo_branch or "master"
