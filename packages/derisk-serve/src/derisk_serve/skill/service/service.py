@@ -220,7 +220,7 @@ class Service(BaseService[SkillEntity, SkillRequest, SkillResponse]):
         )
 
     async def sync_from_git(
-        self, repo_url: str, branch: str = "main", force_update: bool = False
+        self, repo_url: str, branch: str = "master", force_update: bool = False
     ) -> List[SkillResponse]:
         """Sync skills from a git repository
 
@@ -1181,7 +1181,7 @@ class Service(BaseService[SkillEntity, SkillRequest, SkillResponse]):
         return SkillSyncTaskDao(db)
 
     def create_sync_task(
-        self, repo_url: str, branch: str = "main", force_update: bool = False
+        self, repo_url: str, branch: str = "master", force_update: bool = False
     ) -> SkillSyncTaskResponse:
         """Create a new sync task and start it in background
 
