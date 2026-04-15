@@ -247,15 +247,43 @@ export default function TabOverview() {
 
     console.log('[layoutConfigChange] curConfig (computed new chat_in_layout):', curConfig);
 
-    // Fix: Only update chat_in_layout, preserve chat_layout if it exists
-    // If chat_layout is null/undefined, don't set it to avoid backend validation error
-    const newLayout: any = { ...appInfo.layout, chat_in_layout: curConfig };
-    if (appInfo.layout?.chat_layout) {
-      newLayout.chat_layout = appInfo.layout.chat_layout;
-    } else {
-      // If no chat_layout exists, we should keep it as is (don't set to null)
-      console.warn('[layoutConfigChange] WARNING: chat_layout is missing, not updating it');
+    // Fix: 确保chat_layout字段始终存在且有效
+    // 如果appInfo.layout不存在或chat_layout为null/undefined，从当前表单值中重建
+    const currentChatLayoutName = form.getFieldValue('chat_layout');
+    let chatLayoutObj = appInfo.layout?.chat_layout;
+    
+    // 如果chat_layout无效，尝试从layoutDataOptions中重建
+    if (!chatLayoutObj || Object.keys(chatLayoutObj).length === 0) {
+      if (currentChatLayoutName) {
+        chatLayoutObj = layoutDataOptions?.find((item: any) => item.value === currentChatLayoutName);
+        console.log('[layoutConfigChange] Rebuilt chat_layout from form value:', chatLayoutObj);
+      }
+      
+      // 如果仍然无效，使用默认布局
+      if (!chatLayoutObj && layoutDataOptions && layoutDataOptions.length > 0) {
+        chatLayoutObj = layoutDataOptions[0];
+        console.warn('[layoutConfigChange] Using default layout as fallback:', chatLayoutObj);
+      }
     }
+
+    // 创建新的layout对象，确保chat_layout存在
+    const newLayout: any = { 
+      ...appInfo.layout, 
+      chat_in_layout: curConfig 
+    };
+    
+    if (chatLayoutObj) {
+      newLayout.chat_layout = chatLayoutObj;
+    }
+    
+    // 验证layout对象是否满足后端要求
+    if (!newLayout.chat_layout) {
+      console.error('[layoutConfigChange] ERROR: chat_layout is still missing, cannot send request');
+      console.error('[layoutConfigChange] form.chat_layout value:', currentChatLayoutName);
+      console.error('[layoutConfigChange] available layout options:', layoutDataOptions);
+      return; // 不发送无效请求
+    }
+
     console.log('[layoutConfigChange] newLayout object to be sent:', newLayout);
     console.log('[layoutConfigChange] newLayout.chat_layout:', newLayout.chat_layout);
     console.log('[layoutConfigChange] newLayout.chat_in_layout:', newLayout.chat_in_layout);
