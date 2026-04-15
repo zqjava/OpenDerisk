@@ -16,7 +16,21 @@ const nextConfig = {
       },
     ],
   },
-  webpack: config => {
+  // 生成固定的构建 ID，避免文件名哈希
+  generateBuildId: async () => {
+    return 'build';
+  },
+  webpack: (config, { isServer }) => {
+    // 配置输出文件名，去掉哈希指纹
+    if (!isServer) {
+      config.output = config.output || {};
+      // JS 文件：去掉哈希，使用原始文件名
+      config.output.filename = 'static/js/[name].js';
+      config.output.chunkFilename = 'static/js/[name].chunk.js';
+      // CSS 文件：去掉哈希
+      config.output.assetModuleFilename = 'static/media/[name][ext]';
+    }
+
     config.module.rules.push({
       test: /\.svg$/,
       use: ['@svgr/webpack'],
