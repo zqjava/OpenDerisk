@@ -56,11 +56,11 @@ class AppManager(BaseComponent, ABC):
     def init_app(self, system_app: SystemApp):
         self.system_app = system_app
 
-    def get_derisks(self, query: Optional[str], user_code: Optional[str] = None, sys_code: Optional[str] = None):
+    async def get_derisks(self, query: Optional[str], user_code: Optional[str] = None, sys_code: Optional[str] = None):
 
         app_service = AppService.get_instance(CFG.SYSTEM_APP)
 
-        apps = app_service.async_app_list(GptsAppQuery(name_filter=query, user_code=user_code, sys_code=sys_code))
+        apps = await app_service.async_app_list(GptsAppQuery(name_filter=query, user_code=user_code, sys_code=sys_code))
         if apps:
             ## 排除掉非Agent的无法进行链接对话应用，
             results = []
