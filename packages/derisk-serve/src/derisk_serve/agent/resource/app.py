@@ -42,11 +42,16 @@ class GptAppResource(AppResource):
         return self._app_icon
 
     @classmethod
-    def _get_app_list(cls, **kwargs) -> List[AppInfo]:
+    async def _get_app_list(cls, **kwargs) -> List[AppInfo]:
         from derisk_serve.agent.agents.app_agent_manage import get_app_manager
 
         # Only call this function when the system app is initialized
-        apps = get_app_manager().get_derisks(query=kwargs.get("query"), user_code=kwargs.get("user_code"), sys_code=kwargs.get("sys_code"))
+        # apps = get_app_manager().get_derisks(query=kwargs.get("query"), user_code=kwargs.get("user_code"), sys_code=kwargs.get("sys_code"))
+        apps = await get_app_manager().get_derisks(
+            query=kwargs.get("query"),
+            user_code=kwargs.get("user_code"),
+            sys_code=kwargs.get("sys_code")
+        )
         app_list = []
         for app in apps:
             app_list.append(
