@@ -126,7 +126,14 @@ class Layout(BaseModel):
 
     def to_dict(self, **kwargs) -> Dict[str, Any]:
         """Convert the model to a dictionary"""
-        return model_to_dict(self, **kwargs)
+        # 对ChatInParam列表进行手动序列化以避免Pydantic警告
+        result = model_to_dict(self, **kwargs)
+        if result.get('chat_in_layout') and isinstance(result['chat_in_layout'], list):
+            result['chat_in_layout'] = [
+                item.model_dump() if hasattr(item, 'model_dump') else item
+                for item in result['chat_in_layout']
+            ]
+        return result
 
 
 class ServeRequest(BaseModel):

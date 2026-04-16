@@ -206,8 +206,8 @@ class ResourceManager(BaseComponent):
                             # 检查是否是工具实例
                             from derisk.agent.tools.base import ToolBase
                             if hasattr(r.resource_instance, 'metadata') and isinstance(r.resource_instance, ToolBase):
-                                # 工具实例使用metadata中的描述
-                                tool_description = r.resource_instance.metadata.get('description', '')
+                                # 工具实例使用metadata中的描述（Pydantic模型属性直接访问）
+                                tool_description = getattr(r.resource_instance.metadata, 'description', '')
                                 set_configs.append(
                                     {
                                         "label": f"[{r.resource_instance.name}]{tool_description}",
