@@ -60,7 +60,7 @@ class AppManager(BaseComponent, ABC):
 
         app_service = AppService.get_instance(CFG.SYSTEM_APP)
 
-        apps = app_service.sync_app_list(GptsAppQuery(name_filter=query, user_code=user_code, sys_code=sys_code))
+        apps = app_service.async_app_list(GptsAppQuery(name_filter=query, user_code=user_code, sys_code=sys_code))
         if apps:
             ## 排除掉非Agent的无法进行链接对话应用，
             results = []

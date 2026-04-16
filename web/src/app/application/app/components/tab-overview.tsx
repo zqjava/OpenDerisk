@@ -144,8 +144,8 @@ export default function TabOverview() {
     {
       manual: true,
       onSuccess: data => {
-        const resourceData = data?.data?.data[0]?.param_type_options;
-        if (!resourceData) return;
+        // Fix: Safe access to prevent TypeError
+        const resourceData = data?.data?.data?.[0]?.param_type_options || [];
         setResourceOptions(resourceData.map((item: any) => ({ ...item, label: item.label, value: item.key || item.value })));
       },
     },
@@ -241,7 +241,7 @@ export default function TabOverview() {
         if (item === 'model') return { ...rest, param_default_value: form.getFieldValue('model_value') || null, sub_type: form.getFieldValue('model_sub_type') || null };
         if (item === 'temperature') return { ...rest, param_default_value: Number(form.getFieldValue('temperature_value') || rest.param_default_value || null), sub_type: form.getFieldValue('temperature_sub_type') || null };
         if (item === 'max_new_tokens') return { ...rest, param_default_value: Number(form.getFieldValue('max_new_tokens_value') || rest.param_default_value), sub_type: form.getFieldValue('max_new_tokens_sub_type') || null };
-        return chatConfigOptions?.find((md: any) => item.includes(md.param_type)) || {};
+        return (chatConfigOptions || [])?.find((md: any) => item.includes(md.param_type)) || {};
       })
       .filter((obj: any) => Object.keys(obj).length > 0);
 
