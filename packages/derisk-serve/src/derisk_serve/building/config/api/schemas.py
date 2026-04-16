@@ -277,7 +277,37 @@ class ServeRequest(BaseModel):
 
     def to_dict(self, **kwargs) -> Dict[str, Any]:
         """Convert the model to a dictionary"""
-        return model_to_dict(self, **kwargs)
+        # 手动序列化以消除Pydantic对ChatInParam的序列化警告
+        result = {}
+        
+        # 获取所有字段
+        for field_name, field_value in self.__dict__.items():
+            if field_value is None:
+                result[field_name] = None
+            elif isinstance(field_value, list):
+                # 处理列表字段（特别是资源相关的列表）
+                result[field_name] = []
+                for item in field_value:
+                    if hasattr(item, 'to_dict'):
+                        result[field_name].append(item.to_dict())
+                    elif hasattr(item, 'model_dump'):
+                        result[field_name].append(item.model_dump())
+                    else:
+                        result[field_name].append(item)
+            elif hasattr(field_value, 'to_dict'):
+                # 处理嵌套的Layout对象
+                result[field_name] = field_value.to_dict(**kwargs)
+            elif hasattr(field_value, 'model_dump'):
+                # 处理其他Pydantic对象
+                result[field_name] = field_value.model_dump(**kwargs)
+            else:
+                result[field_name] = field_value
+        
+        # 处理一些特殊情况字段
+        if hasattr(self, 'layout') and self.layout and hasattr(self.layout, 'to_dict'):
+            result['layout'] = self.layout.to_dict(**kwargs)
+            
+        return result
 
 
 ServerResponse = ServeRequest
