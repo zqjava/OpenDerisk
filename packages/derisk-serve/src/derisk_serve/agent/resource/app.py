@@ -42,22 +42,28 @@ class GptAppResource(AppResource):
         return self._app_icon
 
     @classmethod
-    async def _get_app_list(cls, **kwargs) -> List[AppInfo]:
-        from derisk_serve.agent.agents.app_agent_manage import get_app_manager
+    def _get_app_list(cls, **kwargs) -> List[AppInfo]:
+        """Get the current app list - Synchronous adapter for async implementation"""
+        import asyncio
+        
+        async def async_get_app_list():
+            from derisk_serve.agent.agents.app_agent_manage import get_app_manager
 
-        # Only call this function when the system app is initialized
-        # apps = get_app_manager().get_derisks(query=kwargs.get("query"), user_code=kwargs.get("user_code"), sys_code=kwargs.get("sys_code"))
-        apps = await get_app_manager().get_derisks(
-            query=kwargs.get("query"),
-            user_code=kwargs.get("user_code"),
-            sys_code=kwargs.get("sys_code")
-        )
-        app_list = []
-        for app in apps:
-            app_list.append(
-                AppInfo(name=app.app_name, icon=app.icon, code=app.app_code, desc=app.app_describe)
+            # Only call this function when the system app is initialized
+            apps = await get_app_manager().get_derisks(
+                query=kwargs.get("query"),
+                user_code=kwargs.get("user_code"),
+                sys_code=kwargs.get("sys_code")
             )
-        return app_list
+            app_list = []
+            for app in apps:
+                app_list.append(
+                    AppInfo(name=app.app_name, icon=app.icon, code=app.app_code, desc=app.app_describe)
+                )
+            return app_list
+        
+        # Run the async function synchronously
+        return asyncio.run(async_get_app_list())
 
     async def _start_app(
         self,

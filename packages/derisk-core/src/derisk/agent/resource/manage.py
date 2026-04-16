@@ -99,6 +99,14 @@ class RegisterResource(BaseModel):
         """Return the parameter description."""
         if self.is_class:
             return self.resource_cls.resource_parameters_class(**kwargs)
+        
+        # 检查是否是工具实例（ToolBase类型），如果是则返回默认资源参数类
+        from derisk.agent.tools.base import ToolBase
+        if hasattr(self.resource_instance, 'metadata') and isinstance(self.resource_instance, ToolBase):
+            from derisk.agent.resource.base import ResourceParameters
+            return ResourceParameters
+        
+        # 对于真正的资源实例，调用原有方法
         return self.resource_instance.prefer_resource_parameters_class(**kwargs)  # type: ignore # noqa
 
 
@@ -195,14 +203,29 @@ class ResourceManager(BaseComponent):
                 if not resource.is_class:
                     for r in self._type_to_resources[resource_type]:
                         if not r.is_class:
-                            set_configs.append(
-                                {
-                                    "label": f"[{r.resource_instance.name}]{r.resource_instance.description}",  # type: ignore
-                                    "key": r.resource_instance.name,  # type: ignore
-                                    "description": r.resource_instance.description,  # type: ignore # noqa
-                                    "name": r.resource_instance.name,  # type: ignore # noqa
-                                }
-                            )  # type: ignore
+                            # 检查是否是工具实例
+                            from derisk.agent.tools.base import ToolBase
+                            if hasattr(r.resource_instance, 'metadata') and isinstance(r.resource_instance, ToolBase):
+                                # 工具实例使用metadata中的描述
+                                tool_description = r.resource_instance.metadata.get('description', '')
+                                set_configs.append(
+                                    {
+                                        "label": f"[{r.resource_instance.name}]{tool_description}",
+                                        "key": r.resource_instance.name,
+                                        "description": tool_description,
+                                        "name": r.resource_instance.name,
+                                    }
+                                )
+                            else:
+                                # 资源实例使用原有的描述
+                                set_configs.append(
+                                    {
+                                        "label": f"[{r.resource_instance.name}]{r.resource_instance.description}",  # type: ignore
+                                        "key": r.resource_instance.name,  # type: ignore
+                                        "description": r.resource_instance.description,  # type: ignore # noqa
+                                        "name": r.resource_instance.name,  # type: ignore # noqa
+                                    }
+                                )  # type: ignore
                 all_instance_options = set_configs
 
             if all_instance_options and version == "v1":
