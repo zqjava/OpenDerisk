@@ -81,6 +81,7 @@ class LLMStrategy(ABC):
         self._llm_client = llm_client
         self._context = context
         self._llm_config = llm_config
+        logger.info(f'加载llm内容：context{context}')
 
     async def all_models(self) -> List[str]:
         all_models = await self._llm_client.models()
