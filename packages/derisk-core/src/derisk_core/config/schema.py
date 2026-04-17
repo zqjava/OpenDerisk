@@ -287,7 +287,7 @@ class FeaturePluginEntry(BaseModel):
 
 class AppConfig(BaseModel):
     name: str = "OpenDeRisk"
-    version: str = "0.1.0"
+    version: str = "0.1.10"
 
     system: SystemConfig = Field(default_factory=SystemConfig)
     web: WebServiceConfig = Field(default_factory=WebServiceConfig)

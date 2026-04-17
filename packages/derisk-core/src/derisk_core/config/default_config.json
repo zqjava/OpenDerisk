@@ -1,6 +1,6 @@
 {
   "name": "OpenDeRisk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "system": {
     "language": "zh",
     "log_level": "INFO",

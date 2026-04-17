@@ -14,7 +14,7 @@ class ConfigLoader:
 
     DEFAULT_CONFIG_NAME = "derisk.json"
     # 默认配置文件路径优先级：用户目录下的 .derisk/derisk.json
-    DEFAULT_CONFIG_PATH = Path.home() / ".derisk" / "derisk.json"
+    DEFAULT_CONFIG_PATH = Path.cwd() / ".derisk" / "derisk.json"
 
     DEFAULT_LOCATIONS = [
         Path.home() / ".derisk" / "derisk.json",  # 优先级最高
@@ -124,12 +124,14 @@ class ConfigManager:
     @classmethod
     def get(cls) -> AppConfig:
         """获取当前配置"""
+        logger.info(f'加载配置文件路径_config: {cls._config}')
         if cls._config is None:
             loaded_path = None
             for location in ConfigLoader.DEFAULT_LOCATIONS:
                 if location.exists():
                     cls._config_path = str(location)
                     loaded_path = location
+                    logger.info(f'加载配置文件路径_config_path: {loaded_path}')
                     break
             cls._config = ConfigLoader.load(str(loaded_path) if loaded_path else None)
         return cls._config
@@ -152,6 +154,7 @@ class ConfigManager:
             cls._ensure_default_config()
 
         cls._config_path = path
+        logger.info(f'11111111配置文件路径path:{path}')
         cls._config = ConfigLoader.load(path)
         logger.info(f"配置已加载: {path}")
         return cls._config
@@ -174,6 +177,7 @@ class ConfigManager:
             load_path = cls.get_default_config_path()
 
         cls._config_path = load_path
+        logger.info(f'22222222 配置文件路径path:{load_path}')
         cls._config = ConfigLoader.load(load_path)
         logger.info(f"配置已重新加载: {load_path}")
         return cls._config

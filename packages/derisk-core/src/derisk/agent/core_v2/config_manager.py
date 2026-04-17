@@ -521,6 +521,7 @@ class GlobalConfig:
     
     @classmethod
     def initialize(cls, config: Optional[Dict[str, Any]] = None):
+        logger.info(f'全局配置config{config}')
         cls._instance = ConfigManager(default_config=config)
     
     @classmethod
