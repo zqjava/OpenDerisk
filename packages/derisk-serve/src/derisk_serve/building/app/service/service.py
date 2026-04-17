@@ -1321,7 +1321,7 @@ class Service(BaseService[ServeEntity, ServeRequest, ServerResponse]):
             logger.warning(f"从 ModelConfigCache 获取模型列表失败: {str(e)}")
 
         # 兜底：返回默认模型
-        default_models = ["deepseek-v3", "deepseek-r1"]
+        default_models = ["qwen-max", "deepseek-r1"]
         logger.warning(f"无法获取可用模型，使用默认模型: {default_models}")
         return default_models
 
