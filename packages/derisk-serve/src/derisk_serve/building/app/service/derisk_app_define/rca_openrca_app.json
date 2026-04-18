@@ -2,7 +2,7 @@
   {
     "app_code": "rca-openrca",
     "app_name": "RCA(OpenRCA)",
-    "app_describe": "基于OpenRca数据集的RCA，AI驱动的微服务故障根因分析智能体，提供分析指导和场景化工具脚本。",
+    "app_describe": "基于OpenRca数据集的RCA，AI驱动的微服务故障根因分析智能体，提供分析指导和场景化工具脚本。.",
     "language": "zh",
     "icon": "/agents/agent4.jpg",
     "team_mode": "single_agent",
