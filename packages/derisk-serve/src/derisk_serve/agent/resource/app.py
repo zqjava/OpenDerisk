@@ -3,6 +3,8 @@
 import uuid
 from typing import List, Optional
 
+import asyncio
+
 from derisk._private.config import Config
 from derisk.agent import AgentMessage, ConversableAgent
 from derisk.agent.resource.app import AppInfo, AppResource
@@ -46,7 +48,14 @@ class GptAppResource(AppResource):
         from derisk_serve.agent.agents.app_agent_manage import get_app_manager
 
         # Only call this function when the system app is initialized
-        apps = get_app_manager().get_derisks(query=kwargs.get("query"), user_code=kwargs.get("user_code"), sys_code=kwargs.get("sys_code"))
+        async def _async_get():
+            return await get_app_manager().get_derisks(
+                query=kwargs.get("query"),
+                user_code=kwargs.get("user_code"),
+                sys_code=kwargs.get("sys_code")
+            )
+        # apps = await get_app_manager().get_derisks(query=kwargs.get("query"), user_code=kwargs.get("user_code"), sys_code=kwargs.get("sys_code"))
+        apps = asyncio.run(_async_get())
         app_list = []
         for app in apps:
             app_list.append(
