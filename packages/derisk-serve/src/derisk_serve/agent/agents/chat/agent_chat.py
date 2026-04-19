@@ -1222,7 +1222,7 @@ class AgentChat(BaseComponent, ABC):
                 auto_team_ctx = app.team_context
 
                 manager_cls: Type[ConversableAgent] = agent_manager.get_by_name(
-                    auto_team_ctx.teamleader
+                    auto_team_ctx['teamleader']
                 )
                 manager = manager_cls()
 
