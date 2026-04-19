@@ -303,6 +303,11 @@ class ResourceManager(BaseComponent):
                     arValueJson['app_code'] = arValueJson['key']
                 if 'app_name' not in arValueJson:
                     arValueJson['app_name'] = arValueJson['name']
+                if resource_value:
+                    if 'app_code' not in resource_value:
+                        resource_value['app_code'] = resource_value['key']
+                    if 'app_name' not in resource_value:
+                        resource_value['app_name'] = resource_value['name']
 
                 # if 'app_code' not in agent_resource:
                 #     agent_resource['app_code'] = arValueJson['key']
