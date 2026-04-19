@@ -307,7 +307,7 @@ class ResourceManager(BaseComponent):
                 if 'app_code' not in agent_resource:
                     agent_resource['app_code'] = arValueJson['key']
                 if 'app_name' not in agent_resource:
-                    agent_resource['app_code'] = arValueJson['name']
+                    agent_resource['app_name'] = arValueJson['name']
 
                 agent_resource.value = json.dumps(arValueJson, ensure_ascii=False)
                 param = parameter_cls.from_dict(
