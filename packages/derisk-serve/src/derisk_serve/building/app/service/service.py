@@ -874,7 +874,8 @@ class Service(BaseService[ServeEntity, ServeRequest, ServerResponse]):
                 app_resp.agent = app_config.team_context.agent_name
             else:
                 if app_config.team_context:
-                    app_resp.agent = app_config.team_context.teamleader
+                    # app_resp.agent = app_config.team_context.teamleader
+                    app_resp.agent = "BAIZE"
 
             ## 处理ReasoningAgent
             reasoning_engine_resource: Optional[AgentResource] = None
