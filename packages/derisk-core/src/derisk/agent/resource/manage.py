@@ -301,7 +301,7 @@ class ResourceManager(BaseComponent):
                 if 'app_code' not in resource_value:
                     resource_value['app_code'] = agent_resource.key
                 if 'app_name' not in resource_value:
-                    resource_value['app_code'] = agent_resource.name
+                    resource_value['app_name'] = agent_resource.name
 
                 param = parameter_cls.from_dict(
                     resource_value if v2_resource else agent_resource.to_dict(),
