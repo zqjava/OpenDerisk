@@ -35,6 +35,7 @@ from derisk.agent.core.memory.gpts import GptsMessage
 from derisk.agent.core.plan.react.team_react_plan import AutoTeamContext
 from derisk.agent.core.sandbox_manager import SandboxManager
 from derisk.agent.core.schema import Status
+from derisk.agent.expand.react_master_agent import ReActMasterAgent
 from derisk.agent.resource import get_resource_manager, ResourceManager
 from derisk.agent.resource.agent_skills import AgentSkillResource
 from derisk.agent.resource.base import FILE_RESOURCES, AgentResource
@@ -1260,7 +1261,7 @@ class AgentChat(BaseComponent, ABC):
                     temp_profile.user_prompt_template = app.user_prompt_template
                 manager.bind(temp_profile)
 
-                if isinstance(manager, ManagerAgent) and len(employees) > 0:
+                if isinstance(manager, ReActMasterAgent) and len(employees) > 0:
                     manager.hire(employees)
                 logger.info(
                     f"_build_agent_by_gpts return:{manager.profile.name},{manager.profile.desc},{id(manager)}"
