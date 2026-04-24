@@ -1261,6 +1261,7 @@ class AgentChat(BaseComponent, ABC):
                 manager.bind(temp_profile)
 
                 if isinstance(manager, ManagerAgent) and len(employees) > 0:
+                    logger.info(f"manager   _build_agent_by_gpts return:{manager.profile.name},{manager.profile.desc},{id(manager)}")
                     manager.hire(employees)
                 logger.info(
                     f"_build_agent_by_gpts return:{manager.profile.name},{manager.profile.desc},{id(manager)}"
