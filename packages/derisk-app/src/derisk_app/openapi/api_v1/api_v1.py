@@ -403,6 +403,7 @@ async def chat_completions(
     dialogue: ConversationVo = Body(),
     user_token: UserRequest = Depends(require_permission("agent", "chat")),
 ):
+    dialogue.work_mode = WorkMode.ASYNC
     logger.info(
         f"chat_completions:{dialogue.team_mode},{dialogue.select_param},"
         f"{dialogue.model_name}, work_mode={dialogue.work_mode}, timestamp={int(time.time() * 1000)}"
