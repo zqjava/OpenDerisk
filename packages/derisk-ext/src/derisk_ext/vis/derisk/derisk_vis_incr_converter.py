@@ -236,6 +236,10 @@ class DeriskVisIncrConverter(DeriskVisConverter):
         return view
 
     async def gen_one_final_notice_vis(self, message: GptsMessage) -> Optional[str]:
+        # 先检查 action_report 是否为 None 或空列表
+        if not message.action_report:
+            return None  # 或者返回适当的默认值
+
         action_report = message.action_report[0]
         if (
             not action_report
