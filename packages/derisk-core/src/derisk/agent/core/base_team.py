@@ -126,6 +126,7 @@ class ManagerAgent(ConversableAgent, Team):
 
     profile: ProfileConfig = ProfileConfig(
         name="ManagerAgent",
+        role="TeamAgent",
         profile="TeamManager",
         goal="manage all hired intelligent agents to complete mission objectives",
         constraints=[],

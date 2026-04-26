@@ -72,12 +72,19 @@ class AgentManager(BaseComponent):
         self._core_agents = list(core_agents)
 
         """Register Manager Agent explicitly（新增）"""
-        from .base_team import ManagerAgent
+        # 2. 安全地注册ManagerAgent
         try:
-            self.register_agent(ManagerAgent)
-            logger.info("Successfully registered ManagerAgent")
-        except Exception as e:
-            logger.warning(f"ManagerAgent already registered or failed: {e}")
+            from .base_team import ManagerAgent
+            # 使用ignore_duplicate=True确保兼容性
+            self.register_agent(ManagerAgent, ignore_duplicate=True)
+            logger.info("[AgentManager] ManagerAgent registered")
+        except ImportError:
+            logger.warning("[AgentManager] ManagerAgent import failed, but system will continue")
+        except ValueError as e:
+            if "already register" in str(e):
+                logger.debug("[AgentManager] ManagerAgent already exists")
+            else:
+                logger.warning(f"[AgentManager] ManagerAgent registration error: {e}")
 
         """Register Extend Agent"""
         for _, agent in scan_agents("derisk_ext.agent.agents").items():
