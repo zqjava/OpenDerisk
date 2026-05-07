@@ -666,7 +666,7 @@ class Service(BaseService[ServeEntity, ServeRequest, ServerResponse]):
                 f"[APP_DETAIL][PERF] _resource_to_app_detail 查询关联app[{app_code}]耗时: {(time.time() - _query_start) * 1000:.2f}ms"
             )
             logger.info(
-                f"[APP_DETAIL][PERF] _resource_to_app_detail 查询关联app_info[{app_info}]耗时: {(time.time() - _query_start) * 1000:.2f}ms"
+                f"[APP_DETAIL][PERF] _resource_to_app_detail 查询关联app[{app_code},app_info[{app_info}]耗时: {(time.time() - _query_start) * 1000:.2f}ms"
             )
             details.append(
                 GptsAppDetail(
